@@ -63,6 +63,27 @@ const WIRE_FIXED32: u32 = 5;
 /// The bits of a field key that hold its wire type; the rest hold the field number.
 const WIRE_TYPE_BITS: u32 = 3;
 
+/// The tag that introduces a field: its number lifted above the three bits that carry the wire
+/// type, with the wire type in them.
+const fn tag(field: u32, wire: u32) -> u32 {
+    (field << WIRE_TYPE_BITS) + wire
+}
+
+/// The tag that introduces field 1, and the four below it for the fields that follow.
+///
+/// The format fixes which wire type each field has, so a writer settles that here rather than at
+/// every field it writes; a reader takes tags apart again instead, which is what lets it read
+/// fields it has no constant for at all.
+const TAG_SHA1: u32 = tag(FIELD_SHA1, WIRE_LEN_DELIMITED);
+/// The tag that introduces field 2.
+const TAG_NUM_BYTES: u32 = tag(FIELD_NUM_BYTES, WIRE_VARINT);
+/// The tag that introduces field 3.
+const TAG_AUDIO_ID: u32 = tag(FIELD_AUDIO_ID, WIRE_VARINT);
+/// The tag that introduces field 4.
+const TAG_TRACK_PAGE_NUMS: u32 = tag(FIELD_TRACK_PAGE_NUMS, WIRE_LEN_DELIMITED);
+/// The tag that introduces field 5.
+const TAG_FILL: u32 = tag(FIELD_FILL, WIRE_LEN_DELIMITED);
+
 /// Why a header block could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -397,21 +418,21 @@ pub fn encode_header(
     };
 
     let mut writer = BlockWriter::new();
-    writer.put_key(FIELD_SHA1, WIRE_LEN_DELIMITED);
+    writer.put_varint(TAG_SHA1);
     writer.put_len(SHA1_LEN);
     writer.put(sha1);
-    writer.put_key(FIELD_NUM_BYTES, WIRE_VARINT);
+    writer.put_varint(TAG_NUM_BYTES);
     writer.put_varint(data_length);
-    writer.put_key(FIELD_AUDIO_ID, WIRE_VARINT);
+    writer.put_varint(TAG_AUDIO_ID);
     writer.put_varint(audio_id.get());
     if !chapter_pages.is_empty() {
-        writer.put_key(FIELD_TRACK_PAGE_NUMS, WIRE_LEN_DELIMITED);
+        writer.put_varint(TAG_TRACK_PAGE_NUMS);
         writer.put_len(packed_len);
         for &page in chapter_pages {
             writer.put_varint(page);
         }
     }
-    writer.put_key(FIELD_FILL, WIRE_LEN_DELIMITED);
+    writer.put_varint(TAG_FILL);
     writer.put_len(fill_len);
     // The fill itself, and the pad byte a message a byte short of the block leaves, are the
     // zeros the block started as.
@@ -469,11 +490,6 @@ impl BlockWriter {
         let mut scratch = [0; varint::MAX_U32_LEN];
 
         self.put(varint::encode_u32(value, &mut scratch));
-    }
-
-    /// Writes the tag that introduces a field: its number and its wire type.
-    fn put_key(&mut self, field: u32, wire: u32) {
-        self.put_varint((field << WIRE_TYPE_BITS) | wire);
     }
 
     /// Writes a length, which the format states as a varint everywhere but the block's prefix.
@@ -1158,6 +1174,39 @@ mod tests {
             std::string::ToString::to_string(error),
             "TAF header block is not 4096 bytes long"
         );
+    }
+
+    #[test]
+    fn tags_the_five_fields_the_way_every_fixture_does() {
+        // The tag bytes observed in front of the fields of all three fixtures.
+        assert_eq!(
+            [
+                TAG_SHA1,
+                TAG_NUM_BYTES,
+                TAG_AUDIO_ID,
+                TAG_TRACK_PAGE_NUMS,
+                TAG_FILL
+            ],
+            [0x0a, 0x10, 0x18, 0x22, 0x2a]
+        );
+    }
+
+    #[test]
+    fn tags_pack_what_the_parser_takes_apart_again() {
+        let wires = [WIRE_VARINT, WIRE_FIXED64, WIRE_LEN_DELIMITED, WIRE_FIXED32];
+
+        for field in 1..=16 {
+            for wire in wires {
+                let key = tag(field, wire);
+
+                assert_eq!(key >> WIRE_TYPE_BITS, field, "field {field}, wire {wire}");
+                assert_eq!(
+                    key & ((1 << WIRE_TYPE_BITS) - 1),
+                    wire,
+                    "field {field}, wire {wire}"
+                );
+            }
+        }
     }
 
     #[test]
