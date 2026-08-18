@@ -2,3 +2,11 @@
 //! reader/writer interfaces — with nothing about how audio gets into a TAF file.
 
 #![no_std]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
+
+pub mod digest;
+pub mod id;
