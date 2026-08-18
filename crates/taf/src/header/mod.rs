@@ -1,9 +1,12 @@
-//! The 4096-byte header block that starts every TAF file, read without copying.
+//! The 4096-byte header block that starts every TAF file, read without copying and written
+//! without allocating.
 //!
 //! A header block is a four-byte big-endian length prefix, a protobuf message of that length,
 //! and zero padding out to the end of the block. [`HeaderView::parse`] checks the framing once
 //! and then borrows the block: the hash stays where it is and the chapter list is decoded while
-//! it is iterated. `FORMAT.md` in this crate describes the wire format and is authoritative.
+//! it is iterated. [`encode_header`] goes the other way, sizing the message's fill so the block
+//! comes out exactly [`BLOCK_LEN`] bytes. `FORMAT.md` in this crate describes the wire format
+//! and is authoritative.
 
 mod varint;
 
@@ -24,6 +27,18 @@ const MAX_MESSAGE_LEN: usize = BLOCK_LEN - PREFIX_LEN;
 
 /// The length of the SHA-1 the header carries.
 const SHA1_LEN: usize = 20;
+
+/// The bytes a field's tag occupies: one, since every field number this format uses is below 16.
+const TAG_LEN: usize = 1;
+
+/// The bytes field 1 occupies: its tag, the one byte that states 20, and the hash itself.
+const SHA1_FIELD_LEN: usize = TAG_LEN + 1 + SHA1_LEN;
+
+/// The least field 5 can occupy: its tag and the one-byte length of an empty fill.
+const MIN_FILL_FIELD_LEN: usize = TAG_LEN + 1;
+
+/// The largest length a one-byte varint states.
+const ONE_BYTE_LEN_MAX: usize = 127;
 
 /// `sha1_hash`: the SHA-1 of the audio region.
 const FIELD_SHA1: u32 = 1;
@@ -291,6 +306,198 @@ impl Iterator for ChapterPages<'_> {
     }
 }
 
+/// Why a header block could not be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EncodeHeaderError {
+    /// The chapter list leaves the rest of the message no room inside a block.
+    TooManyChapters,
+}
+
+impl fmt::Display for EncodeHeaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::TooManyChapters => write!(
+                f,
+                "TAF header chapter list does not fit a {MAX_MESSAGE_LEN}-byte header message"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for EncodeHeaderError {}
+
+/// Writes the header block that starts a TAF file.
+///
+/// The block is [`BLOCK_LEN`] bytes: the big-endian length prefix, the protobuf message, and the
+/// zero fill that pads it out. `sha1` is the hash of the audio region, `data_length` its length
+/// in bytes, and `chapter_pages` the blocks its chapters start at — [`BlockIndex::get`] turns
+/// parsed chapter starts back into the raw numbers this takes.
+///
+/// The message carries the five fields the format requires and nothing else. teddycloud appends
+/// four fields of its own bookkeeping behind the fill, which nothing but its own append path
+/// reads, so this spends those bytes on fill instead; a block written here therefore parses to
+/// the same values as the one teddycloud would write, but not to the same bytes. An empty
+/// `chapter_pages` writes no chapter field at all — an empty packed field is written by writing
+/// nothing — and [`HeaderView::parse`] reads that back as no chapters.
+///
+/// The fill is sized so the message fills the block exactly, except in the one case where no
+/// fill length lands on it: then the message is a byte shorter, the prefix says so, and the
+/// block's last byte is padding. teddycloud's writer has the same one-byte wobble, and readers
+/// accept both.
+///
+/// How many chapters a file may have is a question for whoever writes the file — the format's
+/// own limit is 99 — so only what a block can hold is checked here.
+///
+/// # Errors
+///
+/// [`EncodeHeaderError::TooManyChapters`] if the packed chapter list and the fields around it
+/// leave the fill no room in the 4092 bytes a header message has. That takes eight hundred
+/// chapters at the very least, far past the 99 the format allows.
+pub fn encode_header(
+    sha1: &[u8; SHA1_LEN],
+    data_length: u32,
+    audio_id: AudioId,
+    chapter_pages: &[u32],
+) -> Result<[u8; BLOCK_LEN], EncodeHeaderError> {
+    let mut scratch = [0; varint::MAX_U32_LEN];
+    let packed_len = packed_chapters_len(chapter_pages);
+    let chapter_field_len = if chapter_pages.is_empty() {
+        0
+    } else {
+        TAG_LEN + varint::encode_u32(as_u32(packed_len), &mut scratch).len() + packed_len
+    };
+    let fields_len = SHA1_FIELD_LEN
+        + TAG_LEN
+        + varint::encode_u32(data_length, &mut scratch).len()
+        + TAG_LEN
+        + varint::encode_u32(audio_id.get(), &mut scratch).len()
+        + chapter_field_len;
+
+    // The fill costs at least its tag and the one-byte length of an empty fill, and a message
+    // that cannot pay even that is not a header block.
+    if fields_len + MIN_FILL_FIELD_LEN > MAX_MESSAGE_LEN {
+        return Err(EncodeHeaderError::TooManyChapters);
+    }
+
+    // What the message has left for the fill once the fill's tag is paid for. The length varint
+    // in front of the fill eats into that room too: a one-byte length states payloads up to 127
+    // and so covers up to 128 bytes of room, a two-byte length states 128 and up and so covers
+    // 130 and up. Exactly 129 bytes of room is what neither covers.
+    let room = MAX_MESSAGE_LEN - fields_len - TAG_LEN;
+    let (fill_len, message_len) = if room <= ONE_BYTE_LEN_MAX + 1 {
+        (room - 1, MAX_MESSAGE_LEN)
+    } else if room >= ONE_BYTE_LEN_MAX + 3 {
+        (room - 2, MAX_MESSAGE_LEN)
+    } else {
+        // The message lands a byte short of the block, which teddycloud's own sizing does here
+        // as well, and the byte it leaves stays padding.
+        (ONE_BYTE_LEN_MAX, MAX_MESSAGE_LEN - 1)
+    };
+
+    let mut writer = BlockWriter::new();
+    writer.put_key(FIELD_SHA1, WIRE_LEN_DELIMITED);
+    writer.put_len(SHA1_LEN);
+    writer.put(sha1);
+    writer.put_key(FIELD_NUM_BYTES, WIRE_VARINT);
+    writer.put_varint(data_length);
+    writer.put_key(FIELD_AUDIO_ID, WIRE_VARINT);
+    writer.put_varint(audio_id.get());
+    if !chapter_pages.is_empty() {
+        writer.put_key(FIELD_TRACK_PAGE_NUMS, WIRE_LEN_DELIMITED);
+        writer.put_len(packed_len);
+        for &page in chapter_pages {
+            writer.put_varint(page);
+        }
+    }
+    writer.put_key(FIELD_FILL, WIRE_LEN_DELIMITED);
+    writer.put_len(fill_len);
+    // The fill itself, and the pad byte a message a byte short of the block leaves, are the
+    // zeros the block started as.
+
+    Ok(writer.finish(message_len))
+}
+
+/// Sums the bytes a chapter list packs into.
+///
+/// The sum cannot overflow: a slice holds at most `isize::MAX` bytes, so a slice of `u32` holds
+/// at most a quarter as many entries, and five bytes apiece still leaves the sum below what a
+/// `usize` holds.
+fn packed_chapters_len(chapter_pages: &[u32]) -> usize {
+    let mut scratch = [0; varint::MAX_U32_LEN];
+
+    chapter_pages
+        .iter()
+        .map(|&page| varint::encode_u32(page, &mut scratch).len())
+        .sum()
+}
+
+/// The block being written, and how far into it the writing has come.
+///
+/// Writing starts behind the length prefix, because the prefix states how long the message after
+/// it is and that is only settled once the message has been written.
+struct BlockWriter {
+    block: [u8; BLOCK_LEN],
+    pos: usize,
+}
+
+impl BlockWriter {
+    /// Starts a block of zeros, positioned behind the length prefix.
+    const fn new() -> Self {
+        Self {
+            block: [0; BLOCK_LEN],
+            pos: PREFIX_LEN,
+        }
+    }
+
+    /// Copies as much of `bytes` as the block still holds in at the cursor, and steps past them.
+    ///
+    /// The encoder sizes the whole message before it writes a byte of it, so the block always
+    /// does hold them; pairing the two off against each other rather than trusting that is what
+    /// keeps a block from ever being written past its end.
+    fn put(&mut self, bytes: &[u8]) {
+        for (slot, &byte) in self.block.iter_mut().skip(self.pos).zip(bytes) {
+            *slot = byte;
+        }
+
+        self.pos = self.pos.saturating_add(bytes.len());
+    }
+
+    /// Writes a varint.
+    fn put_varint(&mut self, value: u32) {
+        let mut scratch = [0; varint::MAX_U32_LEN];
+
+        self.put(varint::encode_u32(value, &mut scratch));
+    }
+
+    /// Writes the tag that introduces a field: its number and its wire type.
+    fn put_key(&mut self, field: u32, wire: u32) {
+        self.put_varint((field << WIRE_TYPE_BITS) | wire);
+    }
+
+    /// Writes a length, which the format states as a varint everywhere but the block's prefix.
+    fn put_len(&mut self, len: usize) {
+        self.put_varint(as_u32(len));
+    }
+
+    /// Writes the length prefix in front of the message and hands the finished block over.
+    fn finish(mut self, message_len: usize) -> [u8; BLOCK_LEN] {
+        self.pos = 0;
+        self.put(&as_u32(message_len).to_be_bytes());
+
+        self.block
+    }
+}
+
+/// Narrows a length to the `u32` the format states lengths as.
+///
+/// Every length here is one this encoder derived from a block, so none comes anywhere near this
+/// wide; clamping rather than wrapping keeps an impossible one from passing for a plausible one.
+fn as_u32(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
+
 /// Counts the entries of a packed run of chapter starts, rejecting any that does not decode.
 ///
 /// Doing this once while parsing is what lets [`ChapterPages`] be infallible.
@@ -457,6 +664,40 @@ mod tests {
 
     fn chapters(view: &HeaderView<'_>) -> Vec<u32> {
         view.chapter_pages().map(BlockIndex::get).collect()
+    }
+
+    /// The message length the block's big-endian prefix states.
+    fn message_len(block: &[u8; BLOCK_LEN]) -> usize {
+        let prefix: [u8; PREFIX_LEN] = block[..PREFIX_LEN].try_into().unwrap();
+
+        usize::try_from(u32::from_be_bytes(prefix)).unwrap()
+    }
+
+    /// A chapter list whose packed form is exactly `packed_len` bytes long, which has to be at
+    /// least one byte.
+    ///
+    /// Every entry from 2^21 on packs to four bytes, and an entry packs to `n` bytes from
+    /// 2^(7 * (n - 1)) on, so a run of four-byte entries and one that takes whatever is left
+    /// over reaches any length at all. The result is measured against this module's own varint
+    /// encoder, so a list is never merely assumed to be the size the test that asked for it
+    /// reasons about.
+    fn chapters_packed_to(packed_len: usize) -> Vec<u32> {
+        let mut pages = Vec::new();
+        let mut left = packed_len;
+
+        while left > varint::MAX_U32_LEN {
+            pages.push(1 << 21);
+            left -= 4;
+        }
+        pages.push(1 << (7 * (left - 1)));
+
+        let packed: usize = pages
+            .iter()
+            .map(|&page| varint(u64::from(page)).len())
+            .sum();
+        assert_eq!(packed, packed_len, "the list has to pack to what was asked");
+
+        pages
     }
 
     fn parse_err(block: &[u8]) -> HeaderError {
@@ -916,6 +1157,193 @@ mod tests {
         assert_eq!(
             std::string::ToString::to_string(error),
             "TAF header block is not 4096 bytes long"
+        );
+    }
+
+    #[test]
+    fn encodes_a_header_the_parser_reads_back() {
+        let block = encode_header(&[0xaa; SHA1_LEN], 1234, AudioId::new(99), &[0, 7, 19]).unwrap();
+        let view = HeaderView::parse(&block).unwrap();
+
+        assert_eq!(view.sha1(), &[0xaa; SHA1_LEN]);
+        assert_eq!(view.data_length(), 1234);
+        assert_eq!(view.audio_id(), AudioId::new(99));
+        assert_eq!(view.chapter_count(), 3);
+        assert_eq!(chapters(&view), [0, 7, 19]);
+    }
+
+    #[test]
+    fn writes_a_block_whose_prefix_states_a_message_that_fills_it() {
+        let block = encode_header(&[0xaa; SHA1_LEN], 1234, AudioId::new(99), &[0, 7, 19]).unwrap();
+
+        assert_eq!(block.len(), BLOCK_LEN);
+        assert_eq!(block[..PREFIX_LEN], [0x00, 0x00, 0x0f, 0xfc]);
+        assert_eq!(message_len(&block), MAX_MESSAGE_LEN);
+    }
+
+    #[test]
+    fn writes_neither_a_chapter_field_nor_the_fields_teddycloud_appends() {
+        // An empty chapter list is written by writing nothing, which is what protobuf does with
+        // an empty packed field. Fields 1..=3 then take 22 + 3 + 2 = 27 bytes, so the fill's tag
+        // follows them at 27 and states 4092 - 27 - 3 = 4062 zero bytes that reach the block's
+        // end — where teddycloud would have written four fields of its own bookkeeping.
+        let block = encode_header(&[0xaa; SHA1_LEN], 1234, AudioId::new(99), &[]).unwrap();
+
+        let mut expected = u32::try_from(MAX_MESSAGE_LEN)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        expected.extend(bytes_field(FIELD_SHA1, &[0xaa; SHA1_LEN]));
+        expected.extend(varint_field(FIELD_NUM_BYTES, 1234));
+        expected.extend(varint_field(FIELD_AUDIO_ID, 99));
+        expected.extend(key(FIELD_FILL, WIRE_LEN_DELIMITED));
+        expected.extend(varint(4062));
+
+        assert_eq!(block[..expected.len()], expected[..]);
+        assert!(block[expected.len()..].iter().all(|&byte| byte == 0));
+        assert_eq!(BLOCK_LEN - expected.len(), 4062);
+
+        let view = HeaderView::parse(&block).unwrap();
+        assert_eq!(view.chapter_count(), 0);
+        assert_eq!(view.chapter_pages().next(), None);
+    }
+
+    #[test]
+    fn re_encodes_a_parsed_header_into_the_same_values() {
+        for original in [&GOLDEN[..BLOCK_LEN], REAL_1, REAL_2] {
+            let parsed = HeaderView::parse(original).unwrap();
+            let pages = chapters(&parsed);
+            let block = encode_header(
+                parsed.sha1(),
+                parsed.data_length(),
+                parsed.audio_id(),
+                &pages,
+            )
+            .unwrap();
+            let view = HeaderView::parse(&block).unwrap();
+
+            assert_eq!(view.sha1(), parsed.sha1());
+            assert_eq!(view.data_length(), parsed.data_length());
+            assert_eq!(view.audio_id(), parsed.audio_id());
+            assert_eq!(chapters(&view), pages);
+            assert_eq!(message_len(&block), MAX_MESSAGE_LEN);
+            // Not the same bytes: teddycloud spends the tail of its block on four fields of its
+            // own bookkeeping, and this crate spends it on fill.
+            assert_ne!(block[..], original[..]);
+        }
+    }
+
+    #[test]
+    fn fills_the_block_for_every_short_chapter_list() {
+        for count in 0..=64_u32 {
+            // Narrow entries and wide ones, so both the packed run's own length varint and the
+            // entries in it change width across the sweep.
+            let narrow: Vec<u32> = (0..count).collect();
+            let wide: Vec<u32> = (0..count).map(|page| u32::MAX - page).collect();
+
+            for (width, pages) in [("narrow", narrow), ("wide", wide)] {
+                let block =
+                    encode_header(&SHA1, 110_592, AudioId::new(444_913_029), &pages).unwrap();
+                let view = HeaderView::parse(&block).unwrap();
+
+                assert_eq!(block.len(), BLOCK_LEN);
+                assert_eq!(
+                    message_len(&block),
+                    MAX_MESSAGE_LEN,
+                    "{count} {width} chapters"
+                );
+                assert_eq!(view.chapter_count(), pages.len());
+                assert_eq!(chapters(&view), pages);
+            }
+        }
+    }
+
+    #[test]
+    fn lands_one_byte_short_only_where_no_fill_length_fits_the_room_left() {
+        // Fields 1..=3 take 22 + 3 + 2 = 27 bytes for these values and field 4 adds its tag and
+        // a two-byte length in front of its payload, so a packed list of `packed` bytes leaves
+        // the fill 4092 - (30 + packed) - 1 bytes of room behind its own tag. A one-byte length
+        // covers up to 128 bytes of that room and a two-byte one covers 130 and up, so 129 —
+        // exactly 3932 packed bytes, the size teddycloud's own sizing wobbles at — is the one
+        // amount of room neither covers.
+        let cases = [
+            (3931, MAX_MESSAGE_LEN),
+            (3932, MAX_MESSAGE_LEN - 1),
+            (3933, MAX_MESSAGE_LEN),
+        ];
+
+        for (packed, expected) in cases {
+            let pages = chapters_packed_to(packed);
+            let block = encode_header(&SHA1, 4096, AudioId::new(1), &pages).unwrap();
+            let view = HeaderView::parse(&block).unwrap();
+
+            assert_eq!(message_len(&block), expected, "{packed} packed bytes");
+            assert_eq!(chapters(&view), pages, "{packed} packed bytes");
+        }
+    }
+
+    #[test]
+    fn pads_the_block_out_when_the_message_lands_one_byte_short() {
+        let pages = chapters_packed_to(3932);
+        let block = encode_header(&SHA1, 4096, AudioId::new(1), &pages).unwrap();
+
+        // The fill states 127 bytes, one less than the 128 whose two-byte length would have
+        // overshot, and the block's last byte is the padding that leaves.
+        let fill_tag = PREFIX_LEN + 30 + 3932;
+        assert_eq!(block[fill_tag..fill_tag + 2], [0x2a, 0x7f]);
+        assert!(block[fill_tag + 2..].iter().all(|&byte| byte == 0));
+        assert_eq!(BLOCK_LEN - (fill_tag + 2), 127 + 1);
+        assert_eq!(message_len(&block), MAX_MESSAGE_LEN - 1);
+    }
+
+    #[test]
+    fn fits_the_longest_chapter_list_a_block_holds() {
+        // Fields 1..=3 take 27 bytes here and field 4 adds three more in front of its payload,
+        // so 4060 packed bytes put the fields at 4090 — the most that still leaves field 5 its
+        // tag and the one-byte length of an empty fill.
+        let pages = chapters_packed_to(4060);
+        let block = encode_header(&SHA1, 4096, AudioId::new(1), &pages).unwrap();
+        let view = HeaderView::parse(&block).unwrap();
+
+        assert_eq!(message_len(&block), MAX_MESSAGE_LEN);
+        assert_eq!(chapters(&view), pages);
+        // The fill is empty: its tag and its zero length are the block's last two bytes.
+        assert_eq!(block[BLOCK_LEN - 2..], [0x2a, 0x00]);
+    }
+
+    #[test]
+    fn rejects_a_chapter_list_that_leaves_the_fill_no_room() {
+        // One packed byte more than the block holds, and a list far past any block.
+        let one_too_many = chapters_packed_to(4061);
+        let far_too_many = vec![0_u32; BLOCK_LEN];
+
+        for pages in [one_too_many, far_too_many] {
+            let count = pages.len();
+
+            assert_eq!(
+                encode_header(&SHA1, 4096, AudioId::new(1), &pages).unwrap_err(),
+                EncodeHeaderError::TooManyChapters,
+                "{count} chapters"
+            );
+        }
+    }
+
+    #[test]
+    fn every_encode_error_says_what_went_wrong() {
+        assert_eq!(
+            alloc::format!("{}", EncodeHeaderError::TooManyChapters),
+            "TAF header chapter list does not fit a 4092-byte header message"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn encode_header_error_is_a_standard_error() {
+        let error: &dyn std::error::Error = &EncodeHeaderError::TooManyChapters;
+
+        assert_eq!(
+            std::string::ToString::to_string(error),
+            "TAF header chapter list does not fit a 4092-byte header message"
         );
     }
 }
