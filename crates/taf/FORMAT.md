@@ -142,10 +142,12 @@ Note that `_fill` sits *between* the required fields and the optional ones — t
 Why the wobble exists: shrinking `_fill` by *k* bytes shrinks the message by *k* — unless the
 length varint of `_fill` itself changes size. With `_fill.len` in the normal range
 (128..16383) it is a 2-byte varint before and after, so step 3 lands exactly on 4092 (all
-three fixtures: `_fill.len` = 4043 / 4041 / 4037, prefix 4092). Only when the other fields grow
-past ~3964 bytes (a very long chapter list) does `_fill.len` drop below 128, its varint shrinks
-to 1 byte, and the message packs to **4091**. Then the header block is 4 + 4091 = 4095 written
-bytes plus one trailing zero byte, since the writer seeks to 4096 before writing audio
+three fixtures: `_fill.len` = 4043 / 4041 / 4037, prefix 4092). Writing *R* for the size of
+every field except field 5 (i.e. excluding field 5's tag, length varint and payload), step 2
+yields `_fill.len = 4089 - R` (verified on all three fixtures: *R* = 46 / 48 / 52); only once
+*R* reaches **3962** bytes — a very long chapter list — does that drop below 128, its varint
+shrinks to 1 byte, and the message packs to **4091**. Then the header block is 4 + 4091 = 4095
+written bytes plus one trailing zero byte, since the writer seeks to 4096 before writing audio
 (`src/toniefile.c:151`).
 
 Step 4 is dead code: `d2` is only ever 4092 or 4091, and the decrement it performs is not
@@ -167,8 +169,9 @@ all observed files.
 `if (n_track_page_nums >= TONIEFILE_MAX_CHAPTERS - 1) return ERROR_FAILURE;`
 (`src/toniefile.c:389`), so the 100th chapter is rejected: **99 chapters maximum**.
 Independently, the CLI refuses more than 99 source files
-(`src/main.c:426-429`, "Not more than 99 source files allowed!") and the multi-source
-buffers are `char source[99][PATH_LEN]` (`include/toniefile.h:68-69`, `src/main.c:254`).
+(`src/main.c:426-429`, "Not more than 99 source files allowed!") and the multi-source buffers
+are fixed at 99 entries: `char multisource[99][PATH_LEN]` (`src/main.c:254`), passed to
+`ffmpeg_convert(char source[99][PATH_LEN], …)` (`include/toniefile.h:68-69`).
 
 The header block imposes a second, softer limit: the packed chapter list plus the fixed fields
 must fit in 4092 bytes. With ~35 bytes of fixed fields that is thousands of entries, so 99 is
@@ -191,8 +194,9 @@ Standard Ogg-encapsulated Opus, with TAF-specific block alignment.
 | Bitrate | `encode.bitrate * 1000`, default **96 kbit/s** | `src/toniefile.c:164`; default and range 0..256 at `src/settings.c:255` |
 | Packet padding threshold | 64 bytes | `OPUS_PACKET_PAD` / `OPUS_PACKET_MINSIZE` (`include/toniefile.h:11-12`) |
 
-Observed: every page's granule advances by a multiple of 2880 (6–15 packets per page across
-the fixtures), confirming a uniform 60 ms frame size.
+Observed: every page's granule advances by a multiple of 2880 — 5 packets on the golden
+fixture's first audio page and exactly 6 on every later page — confirming a uniform 60 ms
+frame size.
 
 ### OpusHead packet (19 bytes)
 
@@ -250,8 +254,11 @@ page exactly 3584 bytes to close the block. From offset 8192 on, **every 4096-by
 the start of exactly one page whose total length is exactly 4096** — verified over all 1328
 aligned pages of the 5.4 MB two-chapter file and all 26 of the golden file.
 
-Chapter block *n* ⇒ the page at file offset `4096 * (n + 1)`, whose Ogg sequence number is
-`n + 2` (block 0 holds pages 0, 1, 2). Observed: chapters `[0, 27, 55]` → pages 2, 29, 57;
+Chapter block *n* ⇒ Ogg page `n + 2`, which starts at file offset `4096 * (n + 1)` for
+`n >= 1` and at 4608 for `n = 0` — block 0 holds pages 0, 1, 2, so its chapter page is the
+third one, not the page at 4096. Upstream does the same arithmetic when it seeks to a chapter:
+`filePos = 4096 + 4096 * trackPageNum`, plus `0x200` for the first chapter to skip the two
+header pages (`src/handler.c:752-756`). Observed: chapters `[0, 27, 55]` → pages 2, 29, 57;
 chapters `[0, 663]` → pages 2, 665.
 
 Further observed invariants (all fixtures): Ogg version byte 0; page flags only `0x02` (BOS,
@@ -285,6 +292,14 @@ After the packet is queued (`src/toniefile.c:488-529`): recompute `page_remain`;
 `< TONIEFILE_PAD_END` (64) it must be exactly 0, else teddycloud aborts with "unexpected small
 padding". At 0 the page is flushed and written, and `taf_block_num` is incremented for each
 4096 boundary crossed, with a hard error if the write did not land on a boundary.
+
+The two `page_remain` computations are not the same expression: the pre-encode one subtracts
+the already-returned lacing/body bytes (`lacing_fill - lacing_returned + body_fill -
+body_returned`, `src/toniefile.c:421`) while the post-queue recompute omits the subtraction
+(`lacing_fill + body_fill`, `src/toniefile.c:488`). They agree only because the post-queue
+value is used solely in the `== 0` test, and a page is flushed the moment it is full, so
+nothing has been returned while a page is still filling. An implementation that tracks only
+pending bytes reproduces both.
 
 Worked example, golden fixture page 2 (`file_pos = 4608`): `page_used = 512 + 27 = 539`,
 `page_remain = 3557`, `frame_payload = 13*255 + 229 - 1 = 3543`, `reconstructed = 3557` (no
@@ -355,8 +370,11 @@ authoritative:
 2. **`num_bytes` is `uint64`, not `uint32`** in the proto. Values are bounded by
    `INT32_MAX - 4096`, so a `u32` in-memory representation is safe, but the varint decoder must
    tolerate a full 64-bit varint on the wire rather than rejecting it.
-3. **`track_page_nums` are TAF block indices, not Ogg page sequence numbers.** Block *n* lives
-   at file offset `4096 * (n + 1)` and is Ogg page `n + 2`. Chapter 0 is block 0 = page 2.
+3. **`track_page_nums` are TAF block indices, not Ogg page sequence numbers.** Block *n* is
+   Ogg page `n + 2`, starting at file offset `4096 * (n + 1)` for `n >= 1` and at 4608 for
+   `n = 0` (block 0 also holds pages 0 and 1). Upstream's reader does exactly this arithmetic:
+   `filePos = 4096 + 4096 * trackPageNum`, `+ 0x200` for the first chapter
+   (`src/handler.c:752-756`; written at `src/toniefile.c:393`).
 4. **The first audio page is at offset 4608, not 8192.** The two header pages occupy only
    4096..4608; the first audio page (3584 bytes) fills the rest of the block — OpusHead plus
    padded OpusTags do not fill all of 4096..8192. What *is* true from 8192 on: every 4096-byte
