@@ -9,4 +9,5 @@ extern crate alloc;
 extern crate std;
 
 pub mod digest;
+pub mod header;
 pub mod id;
