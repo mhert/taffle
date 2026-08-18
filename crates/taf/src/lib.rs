@@ -1,3 +1,4 @@
-//! Core Tonie Audio Format (TAF) types, parsing, and validation, usable on `no_std` targets.
+//! The Tonie Audio Format itself — header codec, Ogg framing, packet padding, and
+//! reader/writer interfaces — with nothing about how audio gets into a TAF file.
 
 #![no_std]

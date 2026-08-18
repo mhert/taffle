@@ -1,1 +1,1 @@
-//! Conversion library that turns ordinary audio files into Tonie Audio Format files.
+//! File-oriented conversion workflows shared by any frontend (CLI today, GUI anticipated).

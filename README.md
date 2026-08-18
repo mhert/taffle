@@ -1,11 +1,10 @@
 # taffle
 
-`taffle` converts ordinary audio files (MP3, M4B, WAV, …) into Tonie Audio Format (TAF)
-files that a Toniebox can play: it decodes the input, resamples it to 48 kHz, encodes
-Opus, assembles the TAF container with its chapter table, and writes the result. The
-workspace also ships the reusable pieces separately — a `no_std` core for reading and
-validating TAF, an encoder for writing it, the conversion library, and the `taffle`
-command-line tool.
+Convert audiobooks and music (m4b/m4a, mp3, opus/ogg, flac, wav) into Tonie Audio
+Format (TAF) files for use with teddycloud-backed Tonieboxes. One direct transcode
+(source → Opus), sample-accurate chapters, silence trimming and pause normalization,
+and a built-in TAF validator (`taffle info`). Installable with `cargo install`; no
+runtime dependencies.
 
 **Under construction.** Nothing here works yet; the crates are scaffolding.
 

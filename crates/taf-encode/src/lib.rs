@@ -1,1 +1,2 @@
-//! Encoding side of the Tonie Audio Format: builds TAF headers, Ogg pages, and complete files.
+//! The conversion engine: audio in, TAF out — decode, resample, silence-process, and
+//! Opus-encode into `taf`'s writer.
