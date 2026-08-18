@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/taf", "crates/taf-encode", "crates/taffle", "crates/taffle-cli"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/mhert/taffle"
+
+[workspace.dependencies]
+taf = { path = "crates/taf" }
+taf-encode = { path = "crates/taf-encode" }
+taffle = { path = "crates/taffle" }
+thiserror = "2"
+anyhow = "1"
+sha1 = "0.10"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+missing_errors_doc = "deny"
+module_name_repetitions = "allow"   # PageIndex in module `page` is fine
+must_use_candidate = "allow"        # apply #[must_use] by judgement, not blanket
