@@ -15,6 +15,8 @@
 //! as a `Vec` and is there only with the `alloc` feature.
 
 use core::fmt;
+#[cfg(feature = "alloc")]
+use core::iter;
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -280,19 +282,14 @@ const fn cost(len: usize) -> usize {
 
 /// Writes the lacing values that describe a packet of `len` bytes.
 ///
-/// A 255 for every full segment, then one value below 255 that says the packet ends — which is why
-/// a packet of exactly 255 bytes is laced `255, 0`, and a packet of no bytes at all is laced `0`.
+/// A 255 for every full segment, then what is left over — which is a value below 255, and that is
+/// what says the packet ends there. So a packet of exactly 255 bytes is laced `255, 0`, and a
+/// packet of no bytes at all is laced `0`.
 #[cfg(feature = "alloc")]
 fn lace(lacing: &mut Vec<u8>, len: usize) {
-    let mut left = len;
-
-    while left >= SEGMENT_LEN {
-        lacing.push(CONTINUES);
-        left -= SEGMENT_LEN;
-    }
-
-    // The loop leaves fewer bytes behind than a lacing value states, so this always converts.
-    lacing.push(u8::try_from(left).unwrap_or(CONTINUES));
+    lacing.extend(iter::repeat_n(CONTINUES, len / SEGMENT_LEN));
+    // A remainder is smaller than what it was divided by, so this always converts.
+    lacing.push(u8::try_from(len % SEGMENT_LEN).unwrap_or(CONTINUES));
 }
 
 /// Builds the `OpusHead` packet an Opus stream opens with: version 1, two channels handed in at
