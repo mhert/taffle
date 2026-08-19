@@ -88,6 +88,12 @@ impl<'a> PageView<'a> {
     ///
     /// The checksum is verified here, so a view that exists is a page whose bytes add up.
     ///
+    /// The continued-packet flag (0x01) is not interpreted: a page that states it starts with the
+    /// tail of a packet the page before it began, and [`packets`](PageView::packets) hands that
+    /// tail out as if it were a packet of its own. Joining it to its head is the caller's
+    /// business, and a TAF never asks for it — teddycloud ends every page on a packet boundary
+    /// and sets the flag nowhere.
+    ///
     /// # Errors
     ///
     /// - [`PageError::TooShort`] if fewer bytes were handed in than the 27 a page header
@@ -183,6 +189,10 @@ impl<'a> PageView<'a> {
     }
 
     /// Returns the packets the page carries, sliced out of it as they are iterated.
+    ///
+    /// On a page that states the continued-packet flag (0x01) the first of them is the tail of a
+    /// packet the page before it began, handed out as if it were whole: nothing here interprets
+    /// that flag.
     #[must_use]
     pub const fn packets(&self) -> Packets<'a> {
         Packets {
@@ -202,9 +212,13 @@ impl<'a> PageView<'a> {
 /// A page whose *last* lacing value is 255 ends on a packet it does not finish: RFC 3533 has that
 /// packet carried on by the next page, which marks itself with the continued-packet flag (0x01).
 /// Only whole packets are yielded here, so iteration ends at such a run rather than handing out a
-/// fragment. TAF files never have one — teddycloud pads the last packet of every page so the page
-/// ends on a packet boundary, and the continued-packet flag appears nowhere in a TAF — so joining
-/// packets across pages is something reading a TAF never has to do.
+/// fragment.
+///
+/// The other end of that packet is not interpreted at all: on a page that states the
+/// continued-packet flag, the first packet yielded here is the fragment that finishes what the
+/// page before it began, handed out as if it were whole. A TAF has neither end — teddycloud pads
+/// the last packet of every page so the page ends on a packet boundary, and the flag appears
+/// nowhere in a TAF — so joining packets across pages is something reading a TAF never has to do.
 #[derive(Debug, Clone)]
 pub struct Packets<'a> {
     lacing: &'a [u8],
@@ -284,6 +298,12 @@ mod tests {
     /// The samples per channel one Opus frame carries, which every page's granule advances by a
     /// multiple of.
     const SAMPLES_PER_FRAME: u64 = 2880;
+
+    /// The type flag a page states when its first packet finishes one the page before it began.
+    ///
+    /// It lives here rather than beside the other flags because nothing in the crate reads it: a
+    /// TAF never states it, and reading a page that does is out of scope for this crate.
+    const FLAG_CONTINUED: u8 = 0x01;
 
     /// Builds a page around the lacing values and body given, checksummed the way a writer does.
     ///
@@ -467,6 +487,21 @@ mod tests {
             packet_lens(&PageView::parse(&one_packet_then_a_fragment).unwrap()),
             [4]
         );
+    }
+
+    #[test]
+    fn hands_out_the_fragment_a_continued_page_starts_with_as_a_packet() {
+        // The other end of that run, which nothing here interprets: a page that states the
+        // continued-packet flag parses like any other, and the tail of the packet the page before
+        // it began — the leading four bytes here — is handed out as if it were whole. No accessor
+        // states the flag either, so a caller that has to join the two halves reads the flag byte
+        // itself. A TAF never states it.
+        let continued = page(FLAG_CONTINUED, &[4, 3], &[0xa5; 7]);
+        let view = PageView::parse(&continued).unwrap();
+
+        assert_eq!(packet_lens(&view), [4, 3]);
+        assert!(!view.is_first());
+        assert!(!view.is_last());
     }
 
     #[test]
