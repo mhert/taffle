@@ -316,8 +316,17 @@ mod tests {
         page(0, lacing, &vec![0xa5; body_len])
     }
 
+    /// The packets a page carries, and one more than a page can possibly hold.
+    ///
+    /// A page has at most 255 lacing values and so at most 255 packets. Stopping a step past that
+    /// is what makes an iterator that never ends fail the test that collects it rather than hang
+    /// it.
+    fn packets<'a>(view: &PageView<'a>) -> Vec<&'a [u8]> {
+        view.packets().take(256).collect()
+    }
+
     fn packet_lens(view: &PageView<'_>) -> Vec<usize> {
-        view.packets().map(<[u8]>::len).collect()
+        packets(view).iter().map(|packet| packet.len()).collect()
     }
 
     fn parse_err(page: &[u8]) -> PageError {
@@ -335,7 +344,7 @@ mod tests {
         assert_eq!(view.serial(), 444_913_029);
         assert_eq!(view.total_len(), FIRST_PAGE_LEN);
 
-        let packets: Vec<&[u8]> = view.packets().collect();
+        let packets = packets(&view);
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].len(), 19);
         assert!(packets[0].starts_with(b"OpusHead"));
@@ -547,9 +556,9 @@ mod tests {
         let packets = view.packets();
         let replay = packets.clone();
 
-        assert_eq!(packets.count(), 5);
+        assert_eq!(packets.take(256).count(), 5);
         assert_eq!(
-            replay.map(<[u8]>::len).collect::<Vec<_>>(),
+            replay.take(256).map(<[u8]>::len).collect::<Vec<_>>(),
             [895, 716, 743, 738, 450]
         );
     }
