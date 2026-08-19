@@ -8,6 +8,8 @@
     clippy::indexing_slicing
 )]
 
+// Shared with the pcm and end-to-end tests, which is what leaves parts of it unused here.
+#[allow(dead_code)]
 mod fixtures;
 
 use std::fs;

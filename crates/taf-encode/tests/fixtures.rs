@@ -193,10 +193,57 @@ pub fn m4b_of_a_codec_that_cannot_be_set_up() -> Vec<u8> {
     m4b
 }
 
+/// [`TINY_M4B`] with the two chapter marks it was authored with moved to `starts`, in the hundreds
+/// of nanoseconds `chpl` counts in and in the order the atom lists them.
+///
+/// Which is how a container that lists its marks out of order looks, and how one that begins no
+/// chapter at the start of the recording does — neither of which the fixture itself is, and both of
+/// which a conversion has to hold up under. The titles are left where they are, so the mark a title
+/// belongs to is the one it was authored on: [`M4B_FIRST_TITLE`] on `starts[0]` and
+/// [`M4B_SECOND_TITLE`] on `starts[1]`.
+///
+/// # Panics
+///
+/// If the fixture stops stating the two chapter marks in a `chpl` atom, which would mean it is no
+/// longer the m4b these tests are written against.
+pub fn m4b_with_marks(starts: [u64; 2]) -> Vec<u8> {
+    let mut m4b = TINY_M4B.to_vec();
+    // The atom's contents follow the four bytes naming it, which follow the four stating its
+    // length: a version byte and three of flags, four more from version 1 on, and the number of
+    // marks in a single byte.
+    let contents = m4b
+        .windows(4)
+        .position(|bytes| bytes == b"chpl")
+        .expect("the fixture states a chapter atom")
+        + 4;
+    let versioned = usize::from(m4b[contents] > 0) * 4;
+    let mut at = contents + 4 + versioned + 1;
+
+    for start in starts {
+        m4b[at..at + 8].copy_from_slice(&start.to_be_bytes());
+        // A mark is its start, the length of its title in bytes, and the title itself.
+        at += 8 + 1 + usize::from(m4b[at + 8]);
+    }
+
+    m4b
+}
+
 /// The whole fixture as the bytes of a WAV file.
 pub fn sine_wav() -> Vec<u8> {
-    let data_len = SAMPLES as u32 * BYTES_PER_SAMPLE;
-    let block_align = CHANNELS * BYTES_PER_SAMPLE as u16;
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for frame in 0..FRAMES {
+        let value = (TAU * TONE_HZ * f64::from(frame) / f64::from(SAMPLE_RATE)).sin();
+        samples.push(scaled(value, LEFT_PEAK));
+        samples.push(scaled(value, RIGHT_PEAK));
+    }
+
+    wav_of(SAMPLE_RATE, CHANNELS, &samples)
+}
+
+/// The bytes of a WAV file carrying `samples`, interleaved over `channels` at `rate`.
+pub fn wav_of(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+    let data_len = samples.len() as u32 * BYTES_PER_SAMPLE;
+    let block_align = channels * BYTES_PER_SAMPLE as u16;
 
     let mut wav = Vec::with_capacity(44 + data_len as usize);
 
@@ -209,19 +256,17 @@ pub fn sine_wav() -> Vec<u8> {
     wav.extend_from_slice(b"fmt ");
     wav.extend_from_slice(&16_u32.to_le_bytes());
     wav.extend_from_slice(&1_u16.to_le_bytes()); // format tag 1: uncompressed PCM
-    wav.extend_from_slice(&CHANNELS.to_le_bytes());
-    wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
-    wav.extend_from_slice(&(SAMPLE_RATE * u32::from(block_align)).to_le_bytes()); // bytes per second
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * u32::from(block_align)).to_le_bytes()); // bytes per second
     wav.extend_from_slice(&block_align.to_le_bytes());
     wav.extend_from_slice(&(BYTES_PER_SAMPLE as u16 * 8).to_le_bytes()); // bits per sample
 
     // The data chunk header, and behind it the samples.
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
-    for frame in 0..FRAMES {
-        let value = (TAU * TONE_HZ * f64::from(frame) / f64::from(SAMPLE_RATE)).sin();
-        wav.extend_from_slice(&scaled(value, LEFT_PEAK).to_le_bytes());
-        wav.extend_from_slice(&scaled(value, RIGHT_PEAK).to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
     }
 
     wav
