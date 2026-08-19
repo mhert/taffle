@@ -1,4 +1,20 @@
-//! The audio the decode tests run on, built here byte by byte.
+//! The audio the decode tests run on: the WAV files built here byte by byte, and the encoded ones
+//! committed next door.
+//!
+//! # The files on disk
+//!
+//! AAC and MPEG audio cannot be written out by hand, and the chapter marks and cover art this
+//! crate reads out of their containers only exist once a muxer has put them there. So the encoded
+//! fixtures are committed binaries, generated once with ffmpeg — `tests/fixtures/README.md` holds
+//! the exact commands, the properties they were checked for, and everything the constants below
+//! state about them.
+//!
+//! They all carry the same tone: 10 seconds of a 440 Hz sine at 44 100 Hz, stereo, peaking at
+//! [`ENCODED_PEAK`]. That peak is what a lossy codec has to bring back within a few percent, and
+//! it is far enough from both silence and full scale that a sample conversion which scales by the
+//! wrong power of two lands outside it.
+//!
+//! # The WAV files built here
 //!
 //! A WAV file is a RIFF container, and the smallest one that any decoder accepts is 44 bytes of
 //! header — `RIFF`/`WAVE`, a 16-byte `fmt ` chunk, a `data` chunk header — followed by the samples
@@ -17,7 +33,11 @@
 
 // Every cast below is on a compile-time constant that fits its target, or on a sine bounded by the
 // peak it was scaled with.
-#![allow(clippy::cast_possible_truncation)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 
 use std::f64::consts::TAU;
 
@@ -48,6 +68,78 @@ pub const SAMPLES: usize = FRAMES as usize * CHANNELS as usize;
 
 /// Bytes per sample: 16-bit PCM.
 const BYTES_PER_SAMPLE: u32 = 2;
+
+/// The tone in AAC, in an MP4 that states two chapters and carries [`COVER_PNG`] in a `covr` atom.
+pub const TINY_M4B: &[u8] = include_bytes!("fixtures/tiny.m4b");
+
+/// The tone in MPEG-1 Layer III, carrying [`COVER_PNG`] in the `APIC` frame of an ID3 tag,
+/// and no chapters.
+pub const TINY_MP3: &[u8] = include_bytes!("fixtures/tiny.mp3");
+
+/// An MP4 whose first track is video and whose second one is a second of mono AAC.
+pub const VIDEO_FIRST_MP4: &[u8] = include_bytes!("fixtures/video-first.mp4");
+
+/// An MP4 of one video track and nothing else.
+pub const NO_AUDIO_MP4: &[u8] = include_bytes!("fixtures/no-audio.mp4");
+
+/// An MP4 carrying MPEG audio, which is a container and a codec that between them never state a
+/// channel count.
+pub const MP3_IN_MP4: &[u8] = include_bytes!("fixtures/mp3-in-mp4.mp4");
+
+/// The cover art embedded in [`TINY_M4B`] and [`TINY_MP3`], byte for byte.
+pub const COVER_PNG: &[u8] = include_bytes!("fixtures/cover.png");
+
+/// How many frames of tone the encoded fixtures were authored with: 10 s at [`SAMPLE_RATE`], so
+/// 441 000.
+pub const ENCODED_FRAMES: u64 = 441_000;
+
+/// What the tone peaks at before it is encoded, measured off the PCM ffmpeg authored it from.
+pub const ENCODED_PEAK: i32 = 11_582;
+
+/// Frames in one AAC packet, which is what a chapter mark in [`TINY_M4B`] can be off by: the
+/// encoder's priming frames come out of the decoder as audio, and no timestamp accounts for them.
+pub const AAC_FRAME: u64 = 1024;
+
+/// Where [`TINY_M4B`]'s second chapter was authored: 5 seconds in.
+///
+/// The container states it in 100-nanosecond units — 50 000 000 of them — and at [`SAMPLE_RATE`]
+/// that is 50 000 000 × 44 100 / 10 000 000 = 220 500 frames.
+pub const M4B_SECOND_CHAPTER: u64 = 220_500;
+
+/// What [`TINY_M4B`] calls its first chapter.
+pub const M4B_FIRST_TITLE: &str = "Anfang";
+
+/// What [`TINY_M4B`] calls its second chapter — an umlaut, so a title's length in bytes is not its
+/// length in characters.
+pub const M4B_SECOND_TITLE: &str = "Möhrchen macht Pause";
+
+/// [`TINY_M4B`] with its AAC configuration rewritten to state the one thing this build's decoder
+/// refuses outright: an object type of Main rather than the Low Complexity every m4b is written
+/// in. The container still names a codec there is a decoder for — it just cannot be built from
+/// what the container states about it.
+///
+/// # Panics
+///
+/// If the fixture stops stating an AAC configuration, which would mean it is no longer an m4b.
+pub fn m4b_of_a_codec_that_cannot_be_set_up() -> Vec<u8> {
+    // The configuration follows the descriptor tag that introduces it and the length ffmpeg writes
+    // in its four-byte form.
+    const INTRODUCED_BY: [u8; 4] = [0x05, 0x80, 0x80, 0x80];
+    // Its first byte opens with five bits of object type; the three behind them begin the sample
+    // rate index and are left alone.
+    const MAIN: u8 = 1;
+
+    let mut m4b = TINY_M4B.to_vec();
+    let object_type = m4b
+        .windows(INTRODUCED_BY.len())
+        .position(|bytes| bytes == INTRODUCED_BY)
+        .expect("the fixture states an AAC configuration")
+        + INTRODUCED_BY.len()
+        + 1;
+    m4b[object_type] = (MAIN << 3) | (m4b[object_type] & 0b111);
+
+    m4b
+}
 
 /// The whole fixture as the bytes of a WAV file.
 pub fn sine_wav() -> Vec<u8> {
