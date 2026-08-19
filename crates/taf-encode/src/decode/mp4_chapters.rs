@@ -25,6 +25,11 @@
 //! carries only the track, which some encoders write, states no chapters as far as this is
 //! concerned.
 //!
+//! `chpl` also counts its entries in a single byte, so a book of more than 255 chapters states the
+//! first 255 here and the rest only in its track — one book on the machine this was written on has
+//! 332 chapters and a `chpl` of 255. Neither limit reaches what a TAF carries: a Toniebox stops at
+//! 99 chapters, so a book of that many is being cut down long before this is what loses marks.
+//!
 //! # Nothing here fails a conversion
 //!
 //! Chapter marks are what a file says about itself, and a file that says it badly still plays. So
