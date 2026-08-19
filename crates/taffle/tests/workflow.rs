@@ -231,11 +231,23 @@ fn a_cover_that_cannot_be_written_is_reported_and_the_conversion_still_stands() 
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555))
         .expect("the directory closes");
 
+    // A closed directory is only closed to a user its mode applies to: root carries
+    // CAP_DAC_OVERRIDE and writes into it regardless, so under one there is no refused write for
+    // this test to be about at all. The probe finds that out instead of the test asserting
+    // something that was never going to happen.
+    let probe = dir.path().join("probe");
+    if fs::write(&probe, b"").is_ok() {
+        fs::remove_file(&probe).expect("the probe goes away again");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
+            .expect("the directory opens again");
+
+        return;
+    }
+
     let (outcome, _) = run(job(vec![fixture(BOOK)], Some(taf_path.clone())));
 
     // Whatever the run came to, the directory opens again — a temporary one that cannot be written
-    // to cannot be cleaned up either. (Which is also why this test says nothing under a user that
-    // is allowed to write everywhere regardless.)
+    // to cannot be cleaned up either.
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
         .expect("the directory opens again");
 
