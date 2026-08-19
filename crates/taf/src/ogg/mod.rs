@@ -15,6 +15,10 @@ pub use build::PageBuilder;
 pub use build::{opus_head, opus_tags, BuildError, OPUS_HEAD_LEN, OPUS_PRE_SKIP, OPUS_TAGS_LEN};
 pub use page::{Packets, PageError, PageView};
 
+/// The page arithmetic the writer sizes its packets with, which is this module's own.
+#[cfg(feature = "alloc")]
+pub(crate) use build::{packet_cost, SEGMENT_LEN};
+
 use crate::header::BLOCK_LEN;
 
 /// The length of an aligned Ogg page, which is exactly one [`BLOCK_LEN`] block.
@@ -27,7 +31,7 @@ pub const PAGE_LEN: usize = BLOCK_LEN;
 /// The bytes RFC 3533 puts in front of a page's lacing table: the capture pattern, the version,
 /// the type flags, the granule position, the serial number, the sequence number, the checksum,
 /// and how many lacing values follow.
-const HEADER_LEN: usize = 27;
+pub(crate) const HEADER_LEN: usize = 27;
 
 /// The capture pattern every page starts with.
 const MAGIC: &[u8; 4] = b"OggS";

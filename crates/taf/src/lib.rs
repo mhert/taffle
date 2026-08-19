@@ -14,3 +14,5 @@ pub mod id;
 pub mod ogg;
 #[cfg(feature = "alloc")]
 pub mod opus_packet;
+#[cfg(feature = "alloc")]
+pub mod writer;

@@ -31,7 +31,7 @@ use super::{
 ///
 /// A value below this ends its packet, and 255 says the segment carries on into the next one — so
 /// a packet of exactly this many bytes costs two lacing values, the second of them zero.
-const SEGMENT_LEN: usize = 255;
+pub(crate) const SEGMENT_LEN: usize = 255;
 
 /// The lacing values one page states at most: what the single byte counting them can say.
 const MAX_SEGMENTS: usize = 255;
@@ -194,7 +194,7 @@ impl PageBuilder {
             return Err(BuildError::PacketTooLarge);
         }
 
-        if cost(packet.len()) > self.body_capacity_left() {
+        if packet_cost(packet.len()) > self.body_capacity_left() {
             return Err(BuildError::PageFull);
         }
 
@@ -276,7 +276,7 @@ impl PageBuilder {
 ///
 /// Callers check `len` against [`MAX_PACKET_LEN`] first, so this stays far from overflowing.
 #[cfg(feature = "alloc")]
-const fn cost(len: usize) -> usize {
+pub(crate) const fn packet_cost(len: usize) -> usize {
     len + len / SEGMENT_LEN + 1
 }
 
@@ -461,7 +461,7 @@ mod tests {
     /// What a packet of `len` bytes occupies on a page, spelled out from RFC 3533 rather than
     /// taken from the builder: the packet itself, one lacing value for every full 255-byte
     /// segment, and one more that ends it.
-    fn packet_cost(len: usize) -> usize {
+    fn rfc_packet_cost(len: usize) -> usize {
         len + len / 255 + 1
     }
 
@@ -470,7 +470,7 @@ mod tests {
     fn largest_packet(room: usize) -> usize {
         (0..room)
             .rev()
-            .find(|&len| packet_cost(len) <= room)
+            .find(|&len| rfc_packet_cost(len) <= room)
             .unwrap()
     }
 
@@ -665,12 +665,12 @@ mod tests {
 
             assert_eq!(
                 builder.body_capacity_left(),
-                room - packet_cost(largest),
+                room - rfc_packet_cost(largest),
                 "{filler} bytes in"
             );
             assert_eq!(
                 builder.finish().len(),
-                spent + packet_cost(largest),
+                spent + rfc_packet_cost(largest),
                 "{filler} bytes in"
             );
         }
