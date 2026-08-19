@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PadError {
-    /// No bytes were handed in at all, and RFC 6716 has every packet start with a TOC byte [R1].
+    /// No bytes were handed in at all, and RFC 6716 has every packet start with a TOC byte `[R1]`.
     EmptyPacket,
     /// The length asked for is below the length the packet already has.
     TargetTooSmall,
@@ -83,8 +83,8 @@ const PADDED: u8 = 0b0100_0000;
 /// The bit of the frame count byte that states a length per frame — "v" of §3.2.5.
 const VBR: u8 = 0b1000_0000;
 
-/// The frames one packet may hold: [R5] holds a packet to 120 ms of audio, which is 48 frames even
-/// at the 2.5 ms a frame carries at least.
+/// The frames one packet may hold: `[R5]` holds a packet to 120 ms of audio, which is 48
+/// frames even at the 2.5 ms a frame carries at least.
 const MAX_FRAMES: u8 = 48;
 
 /// The first frame-length byte from which a second one follows (§3.2.1).
@@ -103,7 +103,7 @@ const PAD_CONTINUES: u8 = 255;
 const PAD_MAX: usize = 254;
 
 /// The bytes a code 3 packet's framing takes before any padding length or frame length: the TOC
-/// byte and the frame count byte, the "N-2" of [R6].
+/// byte and the frame count byte, the "N-2" of `[R6]`.
 const FRAMING_LEN: usize = 2;
 
 /// Pads `packet` out to exactly `target_len` bytes, and hands over the packet that comes out.
@@ -131,18 +131,18 @@ const FRAMING_LEN: usize = 2;
 ///
 /// # Errors
 ///
-/// - [`PadError::EmptyPacket`] if no bytes were handed in. [R1] has every packet start with a TOC
+/// - [`PadError::EmptyPacket`] if no bytes were handed in. `[R1]` has every packet start with a TOC
 ///   byte, so there is nothing here to pad and nothing to state a configuration.
 /// - [`PadError::TargetTooSmall`] if `target_len` is below the length `packet` already has.
 ///   Padding never shortens a packet, not even one whose own padding could be dropped.
 /// - [`PadError::TargetTooLarge`] if `target_len` is past the 65 024 bytes an Ogg page's lacing
 ///   table describes, which is the longest packet a page can carry at all.
 /// - [`PadError::MalformedToc`] if the packet does not divide into the frames its TOC byte states,
-///   so there is no frame set to frame again: a code 1 packet whose payload does not halve [R3], a
-///   code 2 or code 3 packet whose stated lengths overrun it [R4,R7], a code 3 packet with no
-///   frame count byte, one stating no frames or more than 48 [R5], one whose padding run does not
-///   end inside it or overruns it [R6,R7], or a CBR code 3 packet whose bytes do not divide by its
-///   frame count [R6].
+///   so there is no frame set to frame again: a code 1 packet whose payload does not halve
+///   `[R3]`, a code 2 or code 3 packet whose stated lengths overrun it `[R4,R7]`, a code 3
+///   packet with no frame count byte, one stating no frames or more than 48 `[R5]`, one whose
+///   padding run does not end inside it or overruns it `[R6,R7]`, or a CBR code 3 packet whose
+///   bytes do not divide by its frame count `[R6]`.
 pub fn pad_to(packet: &[u8], target_len: usize) -> Result<Vec<u8>, PadError> {
     let (&toc, payload) = packet.split_first().ok_or(PadError::EmptyPacket)?;
 
@@ -194,10 +194,10 @@ impl<'a> Frames<'a> {
 
     /// The CBR shape of §3.2.5: `count` frames of one size, no length stated for any of them.
     ///
-    /// [R6] has R — the bytes left once the padding is off — a non-negative integer multiple of M,
-    /// which is what makes every frame R/M bytes long. `checked_rem` rather than `%` so that a
-    /// frame count of zero, which [R5] forbids and [`signalled`](Self::signalled) refuses, could
-    /// not divide by itself here.
+    /// `[R6]` has R — the bytes left once the padding is off — a non-negative integer multiple
+    /// of M, which is what makes every frame R/M bytes long. `checked_rem` rather than `%` so
+    /// that a frame count of zero, which `[R5]` forbids and [`signalled`](Self::signalled)
+    /// refuses, could not divide by itself here.
     fn cbr(count: u8, body: &'a [u8]) -> Result<Self, PadError> {
         if body.len().checked_rem(usize::from(count)) != Some(0) {
             return Err(PadError::MalformedToc);
@@ -212,7 +212,7 @@ impl<'a> Frames<'a> {
 
     /// The VBR shape of §3.2.5: `count` frames, all but the last behind a stated length.
     ///
-    /// [R7] has the packet hold those lengths and the bytes they state.
+    /// `[R7]` has the packet hold those lengths and the bytes they state.
     fn vbr(count: u8, body: &'a [u8]) -> Result<Self, PadError> {
         let mut at = 0;
         let mut stated = 0;
@@ -285,7 +285,7 @@ impl<'a> Frames<'a> {
 ///
 /// A first byte of 0...251 is the length itself, and 0 is a frame that was not transmitted at all.
 /// A first byte of 252...255 says a second one follows, and together they state `second * 4 +
-/// first` — up to the 1275 bytes [R2] holds a frame to.
+/// first` — up to the 1275 bytes `[R2]` holds a frame to.
 fn frame_len(body: &[u8], at: usize) -> Result<(usize, usize), PadError> {
     let &first = body.get(at).ok_or(PadError::MalformedToc)?;
 
@@ -302,8 +302,8 @@ fn frame_len(body: &[u8], at: usize) -> Result<(usize, usize), PadError> {
 ///
 /// §3.2.5 puts the padding's length in the bytes behind the frame count byte: a value of 0...254
 /// states that many padding bytes, on top of the byte stating it, and a value of 255 states 254 of
-/// them plus whatever the next byte states — and [R6,R7] have that next byte be there. The padding
-/// bytes themselves sit at the end of the packet, behind the frames.
+/// them plus whatever the next byte states — and `[R6,R7]` have that next byte be there. The
+/// padding bytes themselves sit at the end of the packet, behind the frames.
 fn unpadded(payload: &[u8]) -> Result<&[u8], PadError> {
     let mut rest = payload;
     let mut padding = 0;
@@ -428,7 +428,7 @@ mod tests {
         vbr: bool,
         /// Whether it states padding, "p" (§3.2.5).
         padded: bool,
-        /// "P" of [R6]: the bytes the padding occupies, the bytes stating its length counted in.
+        /// "P" of `[R6]`: the bytes the padding occupies, the bytes stating its length counted in.
         padding: usize,
         /// The frames the packet carries, in order.
         frames: Vec<&'a [u8]>,
