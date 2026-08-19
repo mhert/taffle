@@ -25,6 +25,7 @@
 //! because before resampling that is the only frame of reference there is — what those marks
 //! become in the output is settled once the pipeline knows what it did to the samples around them.
 
+mod aac_config;
 mod mp4_chapters;
 mod symphonia;
 

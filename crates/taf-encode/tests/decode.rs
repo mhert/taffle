@@ -335,25 +335,58 @@ fn a_container_of_no_audio_at_all_has_nothing_to_decode() {
 
 #[test]
 #[ignore = "reads an audiobook that only exists on the machine this crate is written on"]
-fn a_real_audiobook_is_a_codec_this_build_cannot_decode() {
+fn a_real_audiobook_decodes_whole_with_everything_it_states_about_itself() {
+    // 64 minutes and 12 seconds of it, at 44 100 Hz.
+    const SECONDS: u64 = 3_852;
+
     let path = "/home/mhert/OpenAudible/books/\
                 Grimm und Möhrchen machen Pause von zu Hause (Teil 3).m4b";
     let book = std::fs::File::open(path).expect("the book is on this machine");
 
-    let opened = open_source(Box::new(book));
+    let mut source = open_source(Box::new(book)).expect("the book opens");
 
-    // Every audiobook on this machine states an AAC configuration of two bytes whose
-    // core-coder-dependency flag is set, which leaves no room for the fourteen bits of delay that
-    // flag calls for. Other decoders read past it and decode the audio; symphonia's stops there,
-    // so none of these books can be converted yet. The chapter marks and the cover art *are* read
-    // out of them — that happens before any decoder is built, and the module that does it asserts
-    // this book's sixteen chapters. This is the rest of the way, and when it can be walked the
-    // assertion below is what has to change.
-    assert!(
-        matches!(opened, Err(DecodeError::UnsupportedFormat)),
-        "the book opened as {:?}",
-        opened.map(|_| "a source")
+    assert_eq!(
+        source.spec(),
+        SourceSpec {
+            sample_rate: fixtures::SAMPLE_RATE,
+            channels: fixtures::CHANNELS,
+        }
     );
+    let metadata = source.metadata();
+    let titles: Vec<Option<&str>> = metadata
+        .chapters
+        .iter()
+        .map(|chapter| chapter.title.as_deref())
+        .collect();
+    assert_eq!(titles.len(), 16);
+    assert_eq!(titles.first(), Some(&Some("Kapitel 1")));
+    assert_eq!(titles.last(), Some(&Some("Kapitel 16")));
+    // The book's second chapter is authored at 195.395 s, which at 44 100 Hz is frame 8 616 919.
+    assert_eq!(
+        metadata.chapters.get(1).map(|chapter| chapter.start_sample),
+        Some(8_616_919)
+    );
+    let cover = metadata.cover.expect("the book carries a cover");
+    assert_eq!(cover.mime, "image/jpeg");
+    assert_eq!(cover.bytes.len(), 70_200);
+
+    // The whole book, decoded — every packet of it, which is the part that took repairing the
+    // core coder dependency its configuration states and has no room to describe.
+    let mut frames = 0;
+    let mut peak = 0;
+    while let Some(block) = source.next_block().expect("the book decodes") {
+        let block = std::slice::from_ref(&block);
+        frames += frames_in(block, fixtures::CHANNELS);
+        peak = peak.max(peak_in(block));
+    }
+
+    let seconds = frames / u64::from(fixtures::SAMPLE_RATE);
+    assert!(
+        (SECONDS..=SECONDS + 1).contains(&seconds),
+        "decoded {seconds} seconds of a book of {SECONDS}"
+    );
+    // Speech, not the silence a decoder that ran but understood nothing would hand out.
+    assert!(peak > i32::from(i16::MAX) / 4, "the book decoded to {peak}");
 }
 
 #[test]

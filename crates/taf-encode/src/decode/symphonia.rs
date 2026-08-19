@@ -37,10 +37,11 @@
 //! and where the container states nothing, the shape the decoder set itself up for. It is the same
 //! buffer every block is copied out of, so nothing else could be a better answer.
 
+use std::borrow::Cow;
 use std::io::ErrorKind;
 
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
+use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_AAC};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, FormatReader, Track};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
@@ -48,6 +49,7 @@ use symphonia::core::meta::{Metadata, MetadataOptions, MetadataRevision};
 use symphonia::core::probe::Hint;
 use symphonia::default::{get_codecs, get_probe};
 
+use super::aac_config;
 use super::mp4_chapters::{self, Mp4Chapter};
 use super::{AudioSource, Cover, DecodeError, SourceChapter, SourceMetadata, SourceSpec};
 
@@ -89,7 +91,7 @@ pub fn open_source(mut reader: Box<dyn MediaSource>) -> Result<Box<dyn AudioSour
         // stated and the probe already got through: whatever it refuses, it refuses about the
         // codec and not about the input's bytes.
         let decoder = get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
+            .make(&decodable(&track.codec_params), &DecoderOptions::default())
             .map_err(|_| DecodeError::UnsupportedFormat)?;
         // A track whose shape neither the container nor the decoder states is audio all right —
         // it just cannot be described without decoding it, which is not what a source promises.
@@ -179,6 +181,27 @@ fn audio_track(tracks: &[Track]) -> Option<&Track> {
         .find(|track| get_codecs().get_codec(track.codec_params.codec).is_some())
 }
 
+/// The parameters to build a decoder from: the track's own, unless its codec configuration states
+/// something no decoder can read and this is the one case where what it meant is beyond doubt.
+///
+/// Nothing but AAC is touched, and of AAC only what [`aac_config::repaired`] describes: the
+/// configuration every audiobook here carries, which announces a core coder dependency in a
+/// configuration too short to describe one. What the file says is otherwise what gets used, down
+/// to the byte.
+fn decodable(params: &CodecParameters) -> Cow<'_, CodecParameters> {
+    if params.codec != CODEC_TYPE_AAC {
+        return Cow::Borrowed(params);
+    }
+    let Some(config) = params.extra_data.as_deref().and_then(aac_config::repaired) else {
+        return Cow::Borrowed(params);
+    };
+
+    let mut repaired = params.clone();
+    repaired.with_extra_data(config.into_boxed_slice());
+
+    Cow::Owned(repaired)
+}
+
 /// The shape of a track's signal, or `None` when nothing states how many channels it carries.
 ///
 /// The container is asked first and the decoder's own buffer second, which is the only thing that
@@ -264,5 +287,59 @@ fn stream_error(err: Error) -> Option<DecodeError> {
         Error::IoError(err) if err.kind() == ErrorKind::UnexpectedEof => None,
         Error::IoError(err) => Some(DecodeError::Io(err)),
         err => Some(DecodeError::Decode(err)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use symphonia::core::codecs::{CodecType, CODEC_TYPE_AAC, CODEC_TYPE_MP3};
+
+    use super::{decodable, CodecParameters};
+
+    /// An AAC configuration stating a core coder dependency it has no room to describe.
+    const VESTIGIAL: [u8; 2] = [0x12, 0x12];
+
+    /// The same configuration with nothing to repair.
+    const CANONICAL: [u8; 2] = [0x12, 0x10];
+
+    /// A track of `codec` whose codec configuration is `config`.
+    fn track_of(codec: CodecType, config: &[u8]) -> CodecParameters {
+        let mut params = CodecParameters::new();
+        params
+            .for_codec(codec)
+            .with_extra_data(config.to_vec().into_boxed_slice());
+
+        params
+    }
+
+    #[test]
+    fn an_aac_configuration_that_cannot_be_read_is_repaired_before_it_is_used() {
+        let params = track_of(CODEC_TYPE_AAC, &VESTIGIAL);
+
+        let decodable = decodable(&params);
+
+        assert_eq!(decodable.extra_data.as_deref(), Some(&CANONICAL[..]));
+    }
+
+    #[test]
+    fn the_configuration_of_another_codec_is_left_alone() {
+        // The same bytes mean something else entirely behind another codec, and are not this
+        // module's to rewrite.
+        let params = track_of(CODEC_TYPE_MP3, &VESTIGIAL);
+
+        let decodable = decodable(&params);
+
+        assert_eq!(decodable.extra_data.as_deref(), Some(&VESTIGIAL[..]));
+    }
+
+    #[test]
+    fn a_track_stating_no_configuration_at_all_is_left_alone() {
+        let params = CodecParameters::new();
+
+        let decodable = decodable(&params);
+
+        assert!(decodable.extra_data.is_none());
     }
 }
