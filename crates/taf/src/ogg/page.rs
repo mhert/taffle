@@ -3,32 +3,9 @@
 use core::fmt;
 
 use super::crc::{crc32, crc32_from};
-
-/// The bytes RFC 3533 puts in front of a page's lacing table: the capture pattern, the version,
-/// the type flags, the granule position, the serial number, the sequence number, the checksum,
-/// and how many lacing values follow.
-const HEADER_LEN: usize = 27;
-
-/// The capture pattern every page starts with.
-const MAGIC: &[u8; 4] = b"OggS";
-
-/// The one version of the framing RFC 3533 defines, and the only one a TAF holds.
-const VERSION: u8 = 0;
-
-/// How far into the header the checksum sits.
-const CHECKSUM_AT: usize = 22;
-
-/// The bytes the checksum occupies.
-const CHECKSUM_LEN: usize = 4;
-
-/// The type flag that marks the first page of a stream.
-const FLAG_FIRST: u8 = 0x02;
-
-/// The type flag that marks the last page of a stream.
-const FLAG_LAST: u8 = 0x04;
-
-/// The lacing value that says its packet carries on into the next segment.
-const CONTINUES: u8 = 255;
+use super::{
+    CHECKSUM_AT, CHECKSUM_LEN, CONTINUES, FLAG_FIRST, FLAG_LAST, HEADER_LEN, MAGIC, VERSION,
+};
 
 /// Why an Ogg page could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
