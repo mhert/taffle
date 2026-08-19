@@ -223,18 +223,19 @@ pub fn convert<W: Write + Seek>(
 
             // Every chapter whose place is settled begins in front of this block: the frame in
             // hand is filled out and the chapter starts the block behind it.
-            while begun < stream.chapters_emitted().len() {
+            let settled = stream.chapters_emitted().len();
+            for at in begun..settled {
                 encoder.begin_chapter()?;
                 place(
                     &mut chapters,
                     ChapterOut {
                         page: encoder.block(),
                         start: position(encoder.frames()),
-                        title: plan.get(begun).and_then(|chapter| chapter.title.clone()),
+                        title: plan.get(at).and_then(|chapter| chapter.title.clone()),
                     },
                 );
-                begun += 1;
             }
+            begun = settled;
 
             encoder.push(&block)?;
             progress(Progress::Encoded {
@@ -470,8 +471,11 @@ impl AudioSource for Concat {
     fn next_block(&mut self) -> Result<Option<Vec<i16>>, DecodeError> {
         loop {
             let Some(pcm) = self.current.as_mut() else {
-                // The next input, and the end of the stream where there is none left.
-                if self.open()?.is_none() {
+                // The next input, and the end of the stream where there is none left to open.
+                // What that input carried is the plan's business, and a plan is settled in front
+                // of the stream it is placed in.
+                let _ = self.open()?;
+                if self.current.is_none() {
                     return Ok(None);
                 }
 
@@ -621,13 +625,16 @@ fn place(chapters: &mut Vec<ChapterOut>, chapter: ChapterOut) {
 }
 
 /// Reports every input the conversion has reached since it last did.
+///
+/// An input is reached once, in the order they play: the concatenation states which one it is
+/// reading, and everything from the last one reported to that one is announced here.
 fn reached(reading: &Reading, reported: &mut usize, progress: &mut dyn FnMut(Progress)) {
-    while *reported <= reading.at.get() {
-        progress(Progress::Decoding {
-            input_index: *reported,
-        });
-        *reported += 1;
+    let at = reading.at.get();
+
+    for input_index in *reported..=at {
+        progress(Progress::Decoding { input_index });
     }
+    *reported = at.saturating_add(1);
 }
 
 /// How far into the audio `frames` frames at 48 kHz lie.

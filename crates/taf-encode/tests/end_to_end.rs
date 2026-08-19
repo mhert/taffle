@@ -141,6 +141,26 @@ impl Seek for Full {
     }
 }
 
+/// An output that takes every byte and cannot be closed, the way a file whose failure only shows
+/// when what is buffered behind it is finally pushed out cannot.
+struct Unflushable;
+
+impl Write for Unflushable {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::other("nothing was pushed out"))
+    }
+}
+
+impl Seek for Unflushable {
+    fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+        Ok(0)
+    }
+}
+
 /// The digest a TAF is hashed with, over the `sha1` crate's implementation of it.
 struct Digest(sha1::Sha1);
 
@@ -372,6 +392,29 @@ fn every_input_of_a_conversion_of_several_begins_a_chapter_where_it_begins() {
 }
 
 #[test]
+fn the_marks_an_input_carries_are_not_read_where_there_is_more_than_one_input() {
+    let taf = validated(
+        vec![
+            input(fixtures::TINY_M4B.to_vec(), "tiny.m4b"),
+            input(tone_wav(24_000), "tone.wav"),
+        ],
+        &Conversion::default(),
+    );
+
+    // Handing over two files is a statement of what the chapters are, so the m4b's own second
+    // mark — five seconds into it — begins nothing here, and neither of the two is named.
+    assert_eq!(taf.chapters.len(), 2);
+    assert_eq!(titles(&taf.report), [None, None]);
+    close(
+        starts(&taf.report)[1],
+        Duration::from_secs(10),
+        Duration::from_millis(200),
+    );
+    // The cover is still the one the first input to carry any carried.
+    assert!(taf.report.cover.is_some());
+}
+
+#[test]
 fn the_silence_operations_reach_the_audio_the_file_carries() {
     let mut samples = silence(24_000);
     samples.extend(tone(48_000));
@@ -397,6 +440,94 @@ fn the_silence_operations_reach_the_audio_the_file_carries() {
     assert!(audio.len() / 2 >= 96_000);
     assert!(peak(&audio, 0..47_500) < QUIET, "the pause is silence");
     assert!(peak(&audio, 48_500..95_000) > LOUD, "the tone is behind it");
+}
+
+#[test]
+fn the_leading_silence_operations_belong_to_the_first_input_and_not_to_every_one() {
+    let mut recording = silence(24_000);
+    recording.extend(tone(24_000));
+
+    let taf = validated(
+        vec![
+            input(wav(&recording), "one.wav"),
+            input(wav(&recording), "two.wav"),
+        ],
+        &Conversion {
+            silence: SilenceOpts {
+                skip_leading: 12_000,
+                trim_leading: true,
+                add_pause_leading: 48_000,
+                ..SilenceOpts::default()
+            },
+            ..Conversion::default()
+        },
+    );
+
+    // The first input loses a quarter of a second to the skip and the rest of its silence to the
+    // trim, and gets the second that was asked for in front of its audio instead. The second is
+    // handed through as it came, its own half second of silence and all.
+    assert_eq!(taf.chapters.len(), 2);
+    close(
+        starts(&taf.report)[1],
+        Duration::from_millis(1_500),
+        FRAME_TIME,
+    );
+    close(
+        taf.report.duration,
+        Duration::from_millis(2_500),
+        FRAME_TIME,
+    );
+
+    let audio = decoded(&taf.file);
+    assert!(peak(&audio, 0..47_500) < QUIET, "the pause asked for");
+    assert!(
+        peak(&audio, 48_500..71_500) > LOUD,
+        "the first input's audio"
+    );
+    assert!(
+        peak(&audio, 74_000..95_000) < QUIET,
+        "the second input's own silence, kept"
+    );
+    assert!(
+        peak(&audio, 96_500..119_500) > LOUD,
+        "and its audio behind it"
+    );
+}
+
+#[test]
+fn the_pause_asked_for_at_every_chapter_is_put_in_front_of_every_chapter() {
+    let taf = validated(
+        vec![input(fixtures::TINY_M4B.to_vec(), "tiny.m4b")],
+        &Conversion {
+            silence: SilenceOpts {
+                add_pause_each_chapter: 24_000,
+                ..SilenceOpts::default()
+            },
+            ..Conversion::default()
+        },
+    );
+
+    // Half a second in front of each of the book's two chapters — and the mark it states at its
+    // very start is the chapter the file opens with rather than a second one in the same place,
+    // which would have put that pause in twice.
+    assert_eq!(taf.report.chapters.len(), 2);
+    close(
+        starts(&taf.report)[1],
+        Duration::from_millis(5_500),
+        FRAME_TIME,
+    );
+    close(
+        taf.report.duration,
+        Duration::from_secs(11),
+        Duration::from_millis(250),
+    );
+
+    let audio = decoded(&taf.file);
+    assert!(
+        peak(&audio, 0..23_000) < QUIET,
+        "the pause the file opens with"
+    );
+    assert!(peak(&audio, 27_000..47_000) > LOUD, "the audio behind it");
 }
 
 #[test]
@@ -620,8 +751,18 @@ fn an_output_that_cannot_be_written_to_is_stated_as_the_file_failing_and_not_the
         &mut |_| {},
     );
 
-    for refusal in [opening, midway] {
-        let refusal = refusal.expect_err("the output had no room");
+    // And an output that takes everything and then cannot be pushed out: a conversion is not
+    // finished until what it wrote is out of its hands, so this is a failure too.
+    let unflushed = convert(
+        vec![input(tone_wav(4_800), "tone.wav")],
+        &Conversion::default(),
+        AUDIO_ID,
+        Unflushable,
+        &mut |_| {},
+    );
+
+    for refusal in [opening, midway, unflushed] {
+        let refusal = refusal.expect_err("the output could not take the file");
         assert_eq!(refusal.to_string(), "output i/o failed");
         assert!(matches!(refusal, ConvertError::Io(_)), "{refusal:?}");
     }
@@ -682,11 +823,11 @@ fn a_conversion_with_no_inputs_is_nothing_to_convert() {
 #[test]
 fn a_conversion_that_came_out_with_no_audio_is_still_a_file_of_one_chapter() {
     let taf = validated(
-        vec![input(tone_wav(24_000), "tone.wav")],
+        vec![input(fixtures::TINY_M4B.to_vec(), "tiny.m4b")],
         &Conversion {
             silence: SilenceOpts {
                 // Further in than the recording reaches, so nothing at all is left of it.
-                skip_leading: 10 * u64::from(RATE),
+                skip_leading: 20 * u64::from(RATE),
                 ..SilenceOpts::default()
             },
             ..Conversion::default()
@@ -700,6 +841,8 @@ fn a_conversion_that_came_out_with_no_audio_is_still_a_file_of_one_chapter() {
     assert_eq!(taf.chapters, [0]);
     assert_eq!(starts(&taf.report), [Duration::ZERO]);
     assert!(taf.report.duration < FRAME_TIME);
+    // And the chapter it opens with is the one the book opens with, name and all.
+    assert_eq!(titles(&taf.report), [Some(fixtures::M4B_FIRST_TITLE)]);
 }
 
 #[test]
