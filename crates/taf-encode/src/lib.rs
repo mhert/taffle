@@ -2,7 +2,9 @@
 //! Opus-encode into `taf`'s writer.
 
 pub mod decode;
+pub mod pcm;
 
 pub use decode::{
     open_source, AudioSource, Cover, DecodeError, SourceChapter, SourceMetadata, SourceSpec,
 };
+pub use pcm::{Pcm48, PcmError};

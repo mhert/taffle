@@ -9,6 +9,9 @@ repository.workspace = true
 [dependencies]
 ogg = "0.9"
 opus = "0.3"
+# No default features: the one they bring is the FFT resampler, which this crate does not use and
+# which pulls in a whole FFT stack (`realfft`, `rustfft` and six crates behind them).
+rubato = { version = "0.16", default-features = false }
 sha1 = { workspace = true }
 symphonia = { version = "0.5", features = [
     "mp3",
