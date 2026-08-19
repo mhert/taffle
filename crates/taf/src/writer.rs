@@ -1115,6 +1115,29 @@ mod tests {
     }
 
     #[test]
+    fn fills_the_page_it_moved_a_packet_onto_with_what_comes_after_it() {
+        let pages = Pages::default();
+        let mut writer = writer(&pages);
+
+        writer.add_packet(&packet(228), SAMPLES).unwrap();
+        writer.add_packet(&packet(100), SAMPLES).unwrap();
+        // 3500 bytes occupy 3514 of a page: more than the 3227 left of the first audio page, which
+        // closes it and moves the 100-byte packet onto the next one — and less than the 3968 that
+        // packet leaves there, so this one goes on behind it rather than onto a page of its own.
+        writer.add_packet(&packet(3500), SAMPLES).unwrap();
+
+        let block = writer.finalize().unwrap();
+        let carried = packets_of(&page(&pages, 3));
+
+        assert_eq!(lens(&pages), [47, 465, FIRST_AUDIO_PAGE_LEN, PAGE_LEN]);
+        assert_eq!(carried.len(), 2);
+        assert_eq!(carried[0], packet(100));
+        assert_eq!(carried[1], pad_to(&packet(3500), 3952).unwrap());
+        assert_eq!(granule_of(&page(&pages, 3)), u64::from(SAMPLES) * 3);
+        assert_eq!(HeaderView::parse(&block).unwrap().data_length(), 8192);
+    }
+
+    #[test]
     fn gives_a_packet_it_moved_a_page_of_its_own_when_the_next_one_does_not_fit_behind_it() {
         let pages = Pages::default();
         let mut writer = writer(&pages);
