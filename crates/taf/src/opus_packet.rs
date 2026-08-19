@@ -343,7 +343,9 @@ fn padded(toc: u8, frames: &Frames<'_>, target_len: usize) -> Vec<u8> {
     let states_lengths = if frames.lengths.is_empty() { 0 } else { VBR };
     let states_padding = if padding == 0 { 0 } else { PADDED };
 
-    packet.push((toc & !CODE) | CODE_SIGNALLED);
+    // Code 3 is both of the code bits set, so stating it leaves the six bits above them — the
+    // configuration and the mono/stereo flag — exactly as the packet stated them.
+    packet.push(toc | CODE_SIGNALLED);
     packet.push(frames.count | states_lengths | states_padding);
 
     if padding != 0 {
@@ -900,6 +902,26 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_two_byte_length_a_long_frame_states() {
+        // §3.2.1: a first byte of 252...255 says a second one follows, and together they state
+        // `second * 4 + first` — so these two state 2 * 4 + 252 = 260. Reading them as anything
+        // else makes the two frames look like frames of two sizes, and the packet comes out VBR
+        // with the length restated rather than CBR with it dropped.
+        let mut packet = vec![TOC | 2, 252, 2];
+        packet.extend_from_slice(&[1; 260]);
+        packet.extend_from_slice(&[2; 260]);
+        let padded = pad_to(&packet, 527).unwrap();
+        let decoded = rfc_decode(&padded);
+
+        assert_eq!(packet.len(), 523);
+        assert!(!decoded.vbr, "two frames of 260 bytes are one size");
+        assert_eq!(frame_lens(&decoded), [260, 260]);
+        assert_eq!(decoded.frames, rfc_decode(&packet).frames);
+        assert_eq!(&padded[..3], [TOC | 3, 0b0100_0010, 4]);
+        assert_eq!(decoded.padding, 5);
+    }
+
+    #[test]
     fn states_no_padding_when_framing_the_packet_again_lands_on_the_target() {
         // Framing this code 2 packet as a code 3 packet costs exactly the byte the frame count byte
         // takes, so there is nothing left over to pad: the padding bit stays clear and no length
@@ -947,10 +969,17 @@ mod tests {
                 vec![TOC | 2, 5, 1, 2],
             ),
             ("[R6,R7] code 3 with no frame count byte", vec![TOC | 3]),
-            ("[R5] code 3 stating no frames", vec![TOC | 3, 0, 1, 2]),
+            ("[R5] CBR code 3 stating no frames", vec![TOC | 3, 0, 1, 2]),
             (
+                // Nothing else refuses this one: no length is stated for a frame set of none, so
+                // the frame count byte is the only place it goes wrong.
+                "[R5] VBR code 3 stating no frames",
+                vec![TOC | 3, 0b1000_0000, 1, 2],
+            ),
+            (
+                // A body of 49 bytes divides by 49, so this too is refused for the count alone.
                 "[R5] code 3 stating more than 48 frames",
-                vec![TOC | 3, 49, 1, 2],
+                [vec![TOC | 3, 49], vec![7; 49]].concat(),
             ),
             (
                 "[R6] CBR code 3 whose bytes do not divide by its frame count",
