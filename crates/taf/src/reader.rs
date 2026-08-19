@@ -8,10 +8,13 @@
 //! caller's business — [`finish`](Validator::finish) takes the hash the caller finalized rather
 //! than finalizing one itself.
 //!
-//! What a block holds is fixed. The first one carries the two pages the Opus stream opens with and
-//! the audio page that closes the block; every block behind it carries exactly one page of exactly
-//! a block. That is what lets a box seek to a chapter by multiplying, and it is what this checks
-//! before anything else. `FORMAT.md` in this crate describes the layout and is authoritative.
+//! What a block holds is fixed. The first one carries the two pages the Opus stream opens with —
+//! which span exactly the first 512 bytes of it — and then the audio page that closes the block;
+//! every block behind it carries exactly one page of exactly a block. That is what lets a box seek
+//! to a chapter by multiplying: `4096 + 4096 * block`, plus `0x200` for the first chapter, to skip
+//! the two pages sharing its block. Both offsets are checked here before anything else, since a
+//! file that misses either has chapters that cannot be sought to. `FORMAT.md` in this crate
+//! describes the layout and is authoritative.
 //!
 //! An audio region that is not a whole number of blocks is therefore not one this reads at all:
 //! the short last read is refused as not being a block, and the file comes up short when the walk
@@ -39,12 +42,25 @@ use crate::ogg::{PageError, PageView, OPUS_HEAD_MAGIC, OPUS_TAGS_MAGIC};
 /// The same 4096 as [`BLOCK_LEN`], in the width a file's length is stated and summed in.
 const BLOCK_BYTES: u64 = 4096;
 
+/// The pages every block of a TAF holds, but for the first.
+const BLOCK_PAGES: usize = 1;
+
+/// The pages the Opus stream opens with, which share the front of the first block with the audio
+/// page behind them.
+const HEADER_PAGES: usize = 2;
+
+/// The bytes those two pages span, and so where the first block's audio page begins.
+///
+/// This is the one page offset in a TAF that is not a multiple of the block size, and a box
+/// depends on it: it seeks a chapter to `4096 + 4096 * block` and adds `0x200` for the first
+/// chapter, to skip the two pages sharing block 0. A file whose audio page starts anywhere else
+/// is one whose first chapter cannot be sought to, however well the rest of it adds up.
+/// teddycloud lands on it by fixing the `OpusTags` packet at 436 bytes: 47 + 465 = 512.
+const HEADER_PAGES_LEN: usize = 512;
+
 /// The pages the first block of a TAF holds: the two the Opus stream opens with, and the audio
 /// page that closes the block.
-const FIRST_BLOCK_PAGES: usize = 3;
-
-/// The pages every block behind it holds.
-const BLOCK_PAGES: usize = 1;
+const FIRST_BLOCK_PAGES: usize = HEADER_PAGES + BLOCK_PAGES;
 
 /// Why a TAF's audio region is not one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +78,8 @@ pub enum ValidateError {
         len: usize,
     },
     /// A page does not end where the format puts its end: the last page of a block ends exactly
-    /// where the block does, and no other page in it does.
+    /// where the block does, the two pages the Opus stream opens with end exactly 512 bytes into
+    /// the first block, and no other page of a block ends at either.
     Misaligned {
         /// The sequence number the page states, which is also where it sits in the file.
         page: u32,
@@ -285,7 +302,8 @@ impl<'h> Validator<'h> {
     ///   [`ValidateError::UnexpectedEos`], [`ValidateError::ContinuedPacket`],
     ///   [`ValidateError::GranuleRegression`] or [`ValidateError::MissingOpusHeader`] if a page
     ///   states something no page of a TAF states.
-    /// - [`ValidateError::Misaligned`] if a page does not end where the block it lies in requires.
+    /// - [`ValidateError::Misaligned`] if a page does not end where its block requires: the end of
+    ///   the block, or the 512 bytes the two pages the stream opens with span.
     pub fn push_block(
         &mut self,
         block: &[u8],
@@ -382,9 +400,16 @@ impl<'h> Validator<'h> {
             // The page was read out of what is left of the block, so it ends inside the block.
             at += view.total_len();
 
-            // Which has to be exactly where the block ends for the last page of a block, and
-            // anywhere but there for every page before it.
-            if (at == BLOCK_LEN) != (index + 1 == held) {
+            // And where inside it is fixed twice over. The last page of a block ends exactly where
+            // the block does, and the two pages the stream opens with end exactly
+            // [`HEADER_PAGES_LEN`] bytes into the first block — the offset a box adds to a
+            // chapter's block to skip them. No other page of a block ends at either.
+            let closes_the_block = index + 1 == held;
+            let closes_the_header_pages = held == FIRST_BLOCK_PAGES && index + 1 == HEADER_PAGES;
+
+            if closes_the_block != (at == BLOCK_LEN)
+                || closes_the_header_pages != (at == HEADER_PAGES_LEN)
+            {
                 return Err(ValidateError::Misaligned { page: pages });
             }
 
@@ -1110,6 +1135,19 @@ mod tests {
         short_first.extend(page(2, u64::from(SAMPLES), 0, &[&junk(3542)]));
         short_first.push(0);
 
+        // A first block of exactly the right size whose two Opus header pages span 647 bytes
+        // rather than 512: a box seeks the first chapter to 4096 + 0x200 and would land 135 bytes
+        // inside this file's second page, so the chapter it seeks to is not there. Everything else
+        // about the block adds up — three pages, the last of them closing the block.
+        let head = head_page(BOS);
+        let wide_tags = page(1, 0, 0, &[&opus_tags("taffle", &[]).unwrap(), &junk(134)]);
+
+        assert_eq!((head.len(), wide_tags.len()), (47, 600));
+
+        let mut wide_header_pages = head;
+        wide_header_pages.extend(wide_tags);
+        wide_header_pages.extend(page(2, u64::from(SAMPLES), 0, &[&junk(3408)]));
+
         // And a block behind it that holds two pages rather than one.
         let mut two_pages = first_block();
         two_pages.extend(page(3, 2 * u64::from(SAMPLES), 0, &[&junk(2013)]));
@@ -1117,6 +1155,7 @@ mod tests {
 
         let cases = [
             (one_page, 0, ValidateError::Misaligned { page: 0 }),
+            (wide_header_pages, 0, ValidateError::Misaligned { page: 1 }),
             (short_first, 0, ValidateError::Misaligned { page: 2 }),
             (two_pages, 1, ValidateError::Misaligned { page: 3 }),
         ];
@@ -1319,5 +1358,16 @@ mod tests {
         assert_eq!(BLOCK_LEN, 4096);
         assert_eq!(FIRST_BLOCK_PAGES, 3);
         assert_eq!(BLOCK_PAGES, 1);
+        assert_eq!(HEADER_PAGES, 2);
+        // The 0x200 a box adds to the offset it seeks the first chapter to, which is what the two
+        // pages the golden file opens with span: 47 + 465.
+        assert_eq!(HEADER_PAGES_LEN, 512);
+        assert_eq!(
+            PageView::parse(&GOLDEN[AUDIO_AT..]).unwrap().total_len()
+                + PageView::parse(&GOLDEN[AUDIO_AT + 47..])
+                    .unwrap()
+                    .total_len(),
+            HEADER_PAGES_LEN
+        );
     }
 }
