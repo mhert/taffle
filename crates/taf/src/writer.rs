@@ -27,8 +27,8 @@ use crate::digest::Sha1;
 use crate::header::{self, encode_header, EncodeHeaderError};
 use crate::id::AudioId;
 use crate::ogg::{
-    opus_head, opus_tags, packet_cost, BuildError, PageBuilder, HEADER_LEN, OPUS_HEAD_LEN,
-    OPUS_PRE_SKIP, OPUS_TAGS_LEN, PAGE_LEN, SEGMENT_LEN,
+    opus_head, opus_tags, packet_cost, BuildError, PageBuilder, HEADER_LEN, MAX_SEGMENTS,
+    OPUS_HEAD_LEN, OPUS_PRE_SKIP, OPUS_TAGS_LEN, PAGE_LEN, SEGMENT_LEN,
 };
 use crate::opus_packet::{pad_to, PadError};
 
@@ -77,6 +77,16 @@ const FIRST_CHAPTER: u32 = 0;
 /// is one of them — teddycloud makes the same comparison before it encodes.
 const fn packet_filling(room: usize) -> usize {
     ((room / SEGMENT_STEP) * SEGMENT_LEN + room % SEGMENT_STEP).saturating_sub(1)
+}
+
+/// The lacing values a packet of `len` bytes takes on a page: one for every full 255-byte segment
+/// it spans, and one more that ends it.
+///
+/// [`packet_cost`] is these on top of the packet's own bytes. A page states at most
+/// [`MAX_SEGMENTS`] of them, which is a limit of its own: a page can be out of lacing values with
+/// thousands of bytes to spare, and that is what a stream of very short packets runs into.
+const fn packet_segments(len: usize) -> usize {
+    len / SEGMENT_LEN + 1
 }
 
 /// Why a TAF could not be written.
@@ -188,9 +198,10 @@ impl<D: Sha1, F: FnMut(&[u8])> TafWriter<D, F> {
     /// Adds `packet` to the file, which carries `samples` samples of one channel.
     ///
     /// The packet goes on the page being filled, or starts the next one when it no longer fits —
-    /// and then the page it left is padded out to its full length and emitted. `samples` is what
-    /// the granule positions of the pages are counted in; every packet of a TAF carries 2880, the
-    /// samples 60 ms holds at 48 kHz.
+    /// and then the page it left is padded out to its full length and emitted. A page ends when it
+    /// has no room for the packet, and also when its lacing table has none: a page describes at
+    /// most 255 packets, however short they are. `samples` is what the granule positions of the
+    /// pages are counted in; every packet of a TAF carries 2880, the samples 60 ms holds at 48 kHz.
     ///
     /// # Errors
     ///
@@ -260,6 +271,8 @@ struct Stream<D: Sha1> {
     /// What that page occupies so far: its header, the lacing values of its packets, and the
     /// packets themselves.
     used: usize,
+    /// How many of those lacing values there are, which a page states at most 255 of.
+    lacing: usize,
     /// The packets buffered for it.
     packets: Vec<Packet>,
     /// The blocks the file's chapters start at.
@@ -293,6 +306,7 @@ impl<D: Sha1> Stream<D> {
             written: 0,
             target: FIRST_AUDIO_PAGE_LEN,
             used: HEADER_LEN,
+            lacing: 0,
             packets: Vec::new(),
             chapters: vec![FIRST_CHAPTER],
         };
@@ -340,6 +354,7 @@ impl<D: Sha1> Stream<D> {
             samples,
         });
         self.used += cost;
+        self.lacing += packet_segments(packet.len());
 
         // A page filled to the byte has nothing left to pad and is written straight away.
         if self.used >= self.target {
@@ -434,9 +449,7 @@ impl<D: Sha1> Stream<D> {
         // Whatever the page did not take — see `page_split`, which never names more packets than
         // are buffered — starts the next one.
         self.packets.drain(..taken);
-        self.used = self.packets.iter().fold(HEADER_LEN, |used, packet| {
-            used + packet_cost(packet.bytes.len())
-        });
+        (self.used, self.lacing) = measure(&self.packets);
 
         Ok(())
     }
@@ -450,7 +463,13 @@ impl<D: Sha1> Stream<D> {
     /// never be padded to end the page on the byte. That packet moves onto the next page, and the
     /// packet before it closes this one instead. The first packet of a page has 3557 or 4069 bytes
     /// of room, neither of them a multiple of 256, so a page always keeps a packet it can be closed
-    /// with.
+    /// with — and never more than one packet moves.
+    ///
+    /// The room this reports is what the last packet has to fill in bytes, and only that. The other
+    /// thing padding it costs — the lacing values it takes once it is that long — is settled when a
+    /// packet is taken on rather than here, by [`Stream::room`]: a page is closed before it can no
+    /// longer state them. Capping the room here instead would leave the page short of its target
+    /// length, which is the one thing a TAF's pages may never be.
     fn page_split(&self) -> (usize, usize) {
         let mut room = self.target.saturating_sub(HEADER_LEN);
         let mut taken = 0;
@@ -496,9 +515,42 @@ impl<D: Sha1> Stream<D> {
     }
 
     /// What is left of the page being filled: the bytes one more packet may occupy on it.
+    ///
+    /// Both of a page's limits are in this number, the way
+    /// [`PageBuilder::body_capacity_left`](crate::ogg::PageBuilder::body_capacity_left) states them
+    /// for a page of its own: the bytes left to the length this page has to come to, and the lacing
+    /// values it may still state — `n` of those describe a packet occupying at most `256 * n - 1`
+    /// bytes.
+    ///
+    /// And it is no room at all once the page could no longer be *closed* with a further packet.
+    /// Closing pads the last packet out to fill the room it was pushed into, and a packet that long
+    /// takes more lacing values than the short one it was made from: a page has to keep enough of
+    /// them for that, or it could take packets it could never be built from. That is what a stream
+    /// of packets too short to fill a page runs into — 255 one-byte packets spend the whole lacing
+    /// table on 255 bytes of audio — and the page is closed while the padding still fits.
     fn room(&self) -> usize {
-        self.target.saturating_sub(self.used)
+        let bytes = self.target.saturating_sub(self.used);
+        let values = MAX_SEGMENTS.saturating_sub(self.lacing);
+
+        if packet_segments(packet_filling(bytes)) > values {
+            return 0;
+        }
+
+        bytes.min(values.saturating_mul(SEGMENT_STEP).saturating_sub(1))
     }
+}
+
+/// What the packets buffered for a page occupy — its header counted in — and how many lacing values
+/// they take.
+fn measure(packets: &[Packet]) -> (usize, usize) {
+    packets
+        .iter()
+        .fold((HEADER_LEN, 0), |(used, lacing), packet| {
+            (
+                used + packet_cost(packet.bytes.len()),
+                lacing + packet_segments(packet.bytes.len()),
+            )
+        })
 }
 
 /// The `std` half of the crate's writer: the same file, written into something that seeks.
@@ -795,6 +847,11 @@ mod tests {
     /// The granule position a page states.
     fn granule_of(page: &[u8]) -> u64 {
         PageView::parse(page).unwrap().granule_position()
+    }
+
+    /// How many lacing values a page states: the byte counting them, last of the page header.
+    fn segments_of(page: &[u8]) -> usize {
+        usize::from(page[HEADER_LEN - 1])
     }
 
     /// The chapter starts a header block states.
@@ -1164,6 +1221,101 @@ mod tests {
             [pad_to(&packet(4000), 4053).unwrap()]
         );
         assert_eq!(HeaderView::parse(&block).unwrap().data_length(), 12_288);
+    }
+
+    #[test]
+    fn writes_a_file_out_of_packets_too_short_to_fill_a_page_with() {
+        let pages = Pages::default();
+        let mut writer = writer(&pages);
+
+        // A page describes at most 255 packets, however short they are, so these 256 bytes of audio
+        // are more than any one page carries.
+        for _ in 0..256 {
+            writer.add_packet(&packet(1), SAMPLES).unwrap();
+        }
+
+        let block = writer.finalize().unwrap();
+        let mut file = block.to_vec();
+        file.extend(audio(&pages));
+
+        let view = HeaderView::parse(&block).unwrap();
+        let emitted = pages.borrow();
+        let audio_pages = &emitted[2..];
+
+        // Which makes a file like any other: pages on the lengths the format gives them, and a
+        // header stating the audio region behind it.
+        assert_eq!(lens(&pages), [47, 465, FIRST_AUDIO_PAGE_LEN, PAGE_LEN]);
+        assert_eq!(
+            usize::try_from(view.data_length()),
+            Ok(file.len() - AUDIO_AT)
+        );
+        assert_eq!(view.data_length() % BLOCK_LEN, 0);
+        assert_eq!(chapters(&block), [0]);
+
+        let mut carried = 0;
+
+        for (at, page) in audio_pages.iter().enumerate() {
+            let packets = packets_of(page);
+            let (last, head) = packets.split_last().unwrap();
+
+            // Every page states a lacing table an Ogg page can hold, and every packet handed in is
+            // on one of them — the last of each page padded out to close it, the rest as they came.
+            assert!(segments_of(page) <= MAX_SEGMENTS, "page {at}");
+            assert_eq!(head, vec![packet(1); head.len()], "page {at}");
+            assert_eq!(last, &pad_to(&packet(1), last.len()).unwrap(), "page {at}");
+
+            carried += packets.len();
+        }
+
+        assert_eq!(carried, 256);
+
+        // And it reads back: every page parses, in sequence, and the audio region is the length the
+        // header states.
+        let mut at = AUDIO_AT;
+        let mut sequence = 0;
+
+        while at < file.len() {
+            let page = PageView::parse(&file[at..]).unwrap();
+
+            assert_eq!(page.sequence(), sequence, "page at {at}");
+            at += page.total_len();
+            sequence += 1;
+        }
+
+        assert_eq!(at, file.len());
+    }
+
+    #[test]
+    fn closes_a_page_with_the_last_lacing_values_padding_it_takes() {
+        let pages = Pages::default();
+        let mut writer = writer(&pages);
+
+        for _ in 0..500 {
+            writer.add_packet(&packet(1), SAMPLES).unwrap();
+        }
+
+        let _ = writer.finalize().unwrap();
+        let emitted = pages.borrow();
+
+        // The first audio page takes 244 of them: at that point 11 lacing values are left, and
+        // padding the last packet out to the 3059 bytes that close the page takes 12. The page ends
+        // on the last lacing value it has — 243 for the packets before it and 12 for the padded one
+        // — which is the most an Ogg page states.
+        assert_eq!(packets_of(&emitted[2]).len(), 244);
+        assert_eq!(segments_of(&emitted[2]), MAX_SEGMENTS);
+        assert_eq!(emitted[2].len(), FIRST_AUDIO_PAGE_LEN);
+
+        // A whole page is longer, so its padding spans one more segment and it takes 241.
+        assert_eq!(packets_of(&emitted[3]).len(), 241);
+        assert_eq!(segments_of(&emitted[3]), MAX_SEGMENTS);
+        assert_eq!(emitted[3].len(), PAGE_LEN);
+
+        // What is left over ends the file, padded out like any last page — and nowhere near the
+        // lacing table's limit, which is what makes it the page that is *not* closed by it.
+        assert_eq!(packets_of(&emitted[4]).len(), 500 - 244 - 241);
+        assert_eq!(segments_of(&emitted[4]), 30);
+        assert_eq!(emitted[4].len(), PAGE_LEN);
+        assert_eq!(emitted.len(), 5);
     }
 
     #[test]

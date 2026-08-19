@@ -17,7 +17,7 @@ pub use page::{Packets, PageError, PageView};
 
 /// The page arithmetic the writer sizes its packets with, which is this module's own.
 #[cfg(feature = "alloc")]
-pub(crate) use build::{packet_cost, SEGMENT_LEN};
+pub(crate) use build::{packet_cost, MAX_SEGMENTS, SEGMENT_LEN};
 
 use crate::header::BLOCK_LEN;
 

@@ -34,7 +34,7 @@ use super::{
 pub(crate) const SEGMENT_LEN: usize = 255;
 
 /// The lacing values one page states at most: what the single byte counting them can say.
-const MAX_SEGMENTS: usize = 255;
+pub(crate) const MAX_SEGMENTS: usize = 255;
 
 /// The longest packet a page's lacing table describes at all: 254 full segments and one more value
 /// below 255 to end it.
