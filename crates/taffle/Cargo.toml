@@ -6,5 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+taf = { workspace = true }
+taf-encode = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+sha1 = { workspace = true }
+tempfile = { workspace = true }
+
 [lints]
 workspace = true
