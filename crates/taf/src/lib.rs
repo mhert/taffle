@@ -11,3 +11,4 @@ extern crate std;
 pub mod digest;
 pub mod header;
 pub mod id;
+pub mod ogg;
