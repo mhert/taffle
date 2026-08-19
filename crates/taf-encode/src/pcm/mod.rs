@@ -41,10 +41,12 @@
 //! keeps of it either way.
 
 mod resample;
+mod silence;
 
 use std::num::NonZeroU32;
 
 use resample::Resampler48;
+pub use silence::{SilenceOpts, SilenceProcessor, SILENCE_THRESHOLD};
 
 use crate::decode::{AudioSource, DecodeError};
 

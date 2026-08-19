@@ -1,10 +1,14 @@
 //! What [`Pcm48`] makes of a source: the 48 kHz stereo interleaved `i16` that everything behind
 //! this stage — the silence operations, the Opus encoder — is written for, whatever the input was
-//! authored as.
+//! authored as. And what [`SilenceProcessor`] then makes of *that*: the stream with the silence
+//! taken off the front of its chapters, the pauses put in, and the chapter marks moved to where
+//! their audio ended up.
 //!
 //! The sources here are the fixtures the decode tests run on, plus a few built out of samples on
 //! the spot: [`AudioSource`] is a public trait, so a stage over one has to hold up for a source
-//! nothing in this crate decoded.
+//! nothing in this crate decoded. The silence tests build every stream on the spot and at 48 kHz,
+//! so that what a test states about a frame is what the stage under it sees — no resampler in
+//! between, and no fixture to read.
 
 // Every cast below is on a count a test states or on a wave bounded by the peak it was scaled
 // with, and every index is into a stream the test built or the stage just handed out.
@@ -26,7 +30,8 @@ use std::f64::consts::TAU;
 use std::io::Cursor;
 
 use taf_encode::{
-    open_source, AudioSource, DecodeError, Pcm48, PcmError, SourceMetadata, SourceSpec,
+    open_source, AudioSource, DecodeError, Pcm48, PcmError, SilenceOpts, SilenceProcessor,
+    SourceMetadata, SourceSpec, SILENCE_THRESHOLD,
 };
 
 /// The rate every block a stage hands out is in.
@@ -687,4 +692,839 @@ fn where_a_source_cut_its_blocks_does_not_reach_the_resampled_stream() {
         (right_peak - right_peak / 100..=right_peak + right_peak / 100).contains(&right),
         "the right channel peaks at {right}, not within a percent of {right_peak}"
     );
+}
+
+// --- the silence stage: what `SilenceProcessor` makes of a stream and of its chapter marks ---
+
+/// How many blocks a walk over a processed stream takes before it calls it endless. The longest
+/// stream below is a few hundred blocks; a mutant that hands out silence forever hits this instead
+/// of the machine's memory.
+const MOST_PROCESSED_BLOCKS: usize = 5_000;
+
+/// A processor over a stream of interleaved 48 kHz stereo, handed to it in blocks of `frames`
+/// frames.
+fn processor(
+    stream: &[i16],
+    frames: usize,
+    chapters: Vec<u64>,
+    opts: SilenceOpts,
+) -> SilenceProcessor {
+    let source = Blocks::of(spec(RATE, CHANNELS), stream, frames * usize::from(CHANNELS));
+
+    SilenceProcessor::new(Pcm48::new(source).unwrap(), chapters, opts)
+}
+
+/// Every block a processor hands out, checked on the way for the two things a block always is:
+/// whole frames, and not empty.
+fn processed_blocks(silence: &mut SilenceProcessor) -> Vec<Vec<i16>> {
+    let mut blocks = Vec::new();
+    for _ in 0..MOST_PROCESSED_BLOCKS {
+        let Some(block) = silence.next_block().unwrap() else {
+            return blocks;
+        };
+        assert!(!block.is_empty(), "the processor handed out an empty block");
+        assert_eq!(
+            block.len() % usize::from(CHANNELS),
+            0,
+            "a block of {} samples splits a frame",
+            block.len()
+        );
+        blocks.push(block);
+    }
+
+    panic!("the processor kept handing out blocks");
+}
+
+/// Every sample a processor hands out, one block behind the other.
+fn processed(silence: &mut SilenceProcessor) -> Vec<i16> {
+    processed_blocks(silence).concat()
+}
+
+/// Where the chapters of a processed stream landed, which is only there once it has ended.
+fn adjusted(silence: &SilenceProcessor) -> Vec<u64> {
+    silence
+        .adjusted_chapters()
+        .expect("the stream has ended")
+        .to_vec()
+}
+
+/// `frames` frames at `level` on both channels: silence while the level stays below the threshold,
+/// and the quietest sound there is once it reaches it.
+fn flat(frames: usize, level: i16) -> Vec<i16> {
+    vec![level; frames * usize::from(CHANNELS)]
+}
+
+/// `frames` frames of sound: every single one of them loud on both sides, at a level twice as high
+/// on the left as on the right so that a stage which swapped or folded the channels is plain to
+/// see, and alternating in sign so that it is a signal rather than a constant.
+fn sound(frames: usize) -> Vec<i16> {
+    (0..frames)
+        .flat_map(|at| {
+            if at % 2 == 0 {
+                [12_000, -6_000]
+            } else {
+                [-12_000, 6_000]
+            }
+        })
+        .collect()
+}
+
+/// `frames` frames that say which frame they came from and which side they are on: the left sample
+/// counts the frames up from 1 000 and the right one is its negative. Every sample is far above the
+/// threshold, so nothing here is ever silence, and a stream that dropped, repeated or swapped a
+/// frame says exactly where.
+fn ramp(frames: usize) -> Vec<i16> {
+    (0..frames)
+        .flat_map(|at| {
+            let sample = i16::try_from(at % 30_000).unwrap() + 1_000;
+            [sample, -sample]
+        })
+        .collect()
+}
+
+/// Where the first frame that is not silence sits, in frames.
+fn first_sound(stream: &[i16]) -> Option<usize> {
+    stream
+        .chunks_exact(usize::from(CHANNELS))
+        .position(|frame| {
+            frame
+                .iter()
+                .any(|sample| i32::from(*sample).abs() >= i32::from(SILENCE_THRESHOLD))
+        })
+}
+
+#[test]
+fn the_silence_a_book_begins_with_is_trimmed_off_its_first_chapter() {
+    // A second of the noise floor a recording idles at, then a second of audio. The block lengths
+    // put the end of that silence at every place a block can end: inside one, exactly on the seam
+    // between two, and inside the one block there is.
+    let mut stream = flat(48_000, 30);
+    stream.extend(sound(48_000));
+
+    for frames in [97, 1_024, 48_000, 96_000] {
+        let mut silence = processor(
+            &stream,
+            frames,
+            vec![0],
+            SilenceOpts {
+                trim_leading: true,
+                ..SilenceOpts::default()
+            },
+        );
+
+        let out = processed(&mut silence);
+
+        assert_eq!(out, sound(48_000), "in blocks of {frames} frames");
+        assert_eq!(frames_in(&out), 48_000);
+        assert_eq!(adjusted(&silence), [0]);
+    }
+}
+
+#[test]
+fn a_trim_ends_at_the_first_sound_and_leaves_the_silence_behind_it_alone() {
+    // Silence, audio, silence, audio — all of it one chapter. What a trim takes off is the silence
+    // the chapter *begins* with; the pause the reader took in the middle of it is the recording,
+    // and stays. The second stretch of silence is longer than a block, so a trim that went on
+    // looking for silence would eat a whole block of it.
+    let mut stream = flat(2_400, 20);
+    stream.extend(sound(2_400));
+    stream.extend(flat(2_400, 20));
+    stream.extend(sound(2_400));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0],
+        SilenceOpts {
+            trim_leading: true,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(out, [sound(2_400), flat(2_400, 20), sound(2_400)].concat());
+    assert_eq!(frames_in(&out), 7_200);
+}
+
+#[test]
+fn the_leading_skip_drops_exactly_the_frames_it_states_wherever_a_block_ends() {
+    let stream = ramp(20_000);
+
+    // 4 800 frames in is inside a block, exactly on the seam between two, and the whole first
+    // block — the skip counts frames of the stream and not blocks of it.
+    for frames in [700, 1_200, 4_800, 20_000] {
+        let mut silence = processor(
+            &stream,
+            frames,
+            vec![0],
+            SilenceOpts {
+                skip_leading: 4_800,
+                ..SilenceOpts::default()
+            },
+        );
+
+        let out = processed(&mut silence);
+
+        assert_eq!(
+            out,
+            stream[4_800 * usize::from(CHANNELS)..],
+            "in blocks of {frames} frames"
+        );
+    }
+
+    // And where every block is a single frame, which is where an off-by-one has nowhere to hide.
+    let short = ramp(10);
+    let mut silence = processor(
+        &short,
+        1,
+        vec![0],
+        SilenceOpts {
+            skip_leading: 4,
+            ..SilenceOpts::default()
+        },
+    );
+
+    assert_eq!(
+        processed(&mut silence),
+        short[4 * usize::from(CHANNELS)..].to_vec()
+    );
+}
+
+#[test]
+fn the_leading_skip_runs_in_front_of_the_trim() {
+    // Audio, then silence, then audio: the skip takes the first stretch of audio off, which is what
+    // leaves the trim silence to work on. A trim that ran first would find sound at the very first
+    // frame, take nothing off, and leave that silence sitting in the middle of the output.
+    let mut stream = sound(48_000);
+    stream.extend(flat(4_800, 20));
+    stream.extend(sound(24_000));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0],
+        SilenceOpts {
+            skip_leading: 48_000,
+            trim_leading: true,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(out, sound(24_000));
+    assert_eq!(adjusted(&silence), [0]);
+}
+
+#[test]
+fn the_pause_a_chapter_is_given_replaces_the_silence_that_was_trimmed_off_it() {
+    // The silence the recording came with is at the noise floor rather than at zero, so the second
+    // of silence the output begins with can only be the one that was inserted: exact zeros, all
+    // 48 000 frames of them.
+    let mut stream = flat(48_000, 30);
+    stream.extend(sound(24_000));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0],
+        SilenceOpts {
+            trim_leading: true,
+            add_pause_leading: 48_000,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(out, [flat(48_000, 0), sound(24_000)].concat());
+    assert_eq!(frames_in(&out), 72_000);
+    assert_eq!(first_sound(&out), Some(48_000));
+    assert_eq!(adjusted(&silence), [0]);
+}
+
+#[test]
+fn a_chapter_that_is_asked_for_it_is_trimmed_wherever_it_begins() {
+    // Three chapters, two of which begin with silence: 24 000 frames of audio, then a chapter of
+    // 12 000 silent and 24 000 sounding frames, then one of 6 000 silent and 12 000 sounding.
+    let mut stream = sound(24_000);
+    stream.extend(flat(12_000, 20));
+    stream.extend(sound(24_000));
+    stream.extend(flat(6_000, 20));
+    stream.extend(sound(12_000));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 24_000, 60_000],
+        SilenceOpts {
+            trim_each_chapter: true,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(out, [sound(24_000), sound(24_000), sound(12_000)].concat());
+    // The second chapter begins where the first one ended, and the third has moved left by both
+    // trims together.
+    assert_eq!(adjusted(&silence), [0, 24_000, 48_000]);
+}
+
+#[test]
+fn a_pause_at_every_chapter_moves_every_chapter_behind_it_back() {
+    let stream = sound(72_000);
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 24_000, 48_000],
+        SilenceOpts {
+            add_pause_each_chapter: 4_800,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    // Each chapter is a pause and then its audio, and each mark is on the first frame of its own
+    // pause — so the second has moved back by one pause and the third by two.
+    assert_eq!(
+        out,
+        [
+            flat(4_800, 0),
+            sound(24_000),
+            flat(4_800, 0),
+            sound(24_000),
+            flat(4_800, 0),
+            sound(24_000),
+        ]
+        .concat()
+    );
+    assert_eq!(adjusted(&silence), [0, 28_800, 57_600]);
+    assert_eq!(frames_in(&out), 86_400);
+}
+
+#[test]
+fn two_chapters_that_begin_in_the_same_place_both_begin_there() {
+    // Chapter starts that are not strictly increasing are not this stage's to refuse — the chapter
+    // plan is settled in front of it. A second chapter at the same frame as the one before it, and
+    // a third whose start lies behind both, begin one after the other at the first frame at or
+    // behind them, each with its own pause.
+    let stream = sound(9_600);
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 4_800, 4_800, 1_000],
+        SilenceOpts {
+            add_pause_each_chapter: 1_200,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(
+        out,
+        [flat(1_200, 0), sound(4_800), flat(3_600, 0), sound(4_800),].concat()
+    );
+    assert_eq!(adjusted(&silence), [0, 6_000, 7_200, 8_400]);
+}
+
+#[test]
+fn a_chapter_that_is_nothing_but_silence_trims_to_no_length_at_all() {
+    let mut stream = sound(24_000);
+    stream.extend(flat(24_000, 20));
+    stream.extend(sound(24_000));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 24_000, 48_000],
+        SilenceOpts {
+            trim_each_chapter: true,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(out, [sound(24_000), sound(24_000)].concat());
+    // The chapter is still there and still in its place in the order — it just begins where the
+    // chapter behind it does.
+    assert_eq!(adjusted(&silence), [0, 24_000, 24_000]);
+}
+
+#[test]
+fn a_stream_that_is_nothing_but_silence_comes_out_as_no_stream_at_all() {
+    let stream = flat(48_000, 20);
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 24_000],
+        SilenceOpts {
+            trim_each_chapter: true,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let blocks = processed_blocks(&mut silence);
+
+    assert!(blocks.is_empty(), "a stream of silence handed out audio");
+    assert_eq!(adjusted(&silence), [0, 0]);
+}
+
+#[test]
+fn a_sample_at_the_threshold_is_sound_and_one_below_it_is_silence() {
+    assert_eq!(SILENCE_THRESHOLD, 58);
+
+    // Below the threshold on both sides is silence and goes; at it on either side is sound and
+    // stays. Both signs of both, since what counts is how far from zero a sample is.
+    for level in [SILENCE_THRESHOLD - 1, -(SILENCE_THRESHOLD - 1)] {
+        let mut stream = flat(4_800, level);
+        stream.extend(sound(4_800));
+        let mut silence = processor(
+            &stream,
+            1_024,
+            vec![0],
+            SilenceOpts {
+                trim_leading: true,
+                ..SilenceOpts::default()
+            },
+        );
+
+        assert_eq!(processed(&mut silence), sound(4_800), "at level {level}");
+    }
+    for level in [SILENCE_THRESHOLD, -SILENCE_THRESHOLD] {
+        let mut stream = flat(4_800, level);
+        stream.extend(sound(4_800));
+        let mut silence = processor(
+            &stream,
+            1_024,
+            vec![0],
+            SilenceOpts {
+                trim_leading: true,
+                ..SilenceOpts::default()
+            },
+        );
+
+        assert_eq!(processed(&mut silence), stream, "at level {level}");
+    }
+}
+
+#[test]
+fn a_frame_is_sound_when_either_of_its_channels_is() {
+    // One side at a level nobody could miss and the other at zero: the frame is audible, so it is
+    // not silence. The frame's peak is the louder of its two samples, not the quieter one and not
+    // the two of them averaged.
+    for frame in [[100, 0], [0, 100], [-100, 0], [0, -100]] {
+        let loud: Vec<i16> = std::iter::repeat_n(frame, 4_800).flatten().collect();
+        let mut stream = loud.clone();
+        stream.extend(sound(4_800));
+        let mut silence = processor(
+            &stream,
+            1_024,
+            vec![0],
+            SilenceOpts {
+                trim_leading: true,
+                ..SilenceOpts::default()
+            },
+        );
+
+        assert_eq!(processed(&mut silence), stream, "with frames of {frame:?}");
+    }
+
+    // And a frame whose loudest side is still below the threshold is silence, whichever side that
+    // is.
+    for frame in [[SILENCE_THRESHOLD - 1, 0], [0, SILENCE_THRESHOLD - 1]] {
+        let quiet: Vec<i16> = std::iter::repeat_n(frame, 4_800).flatten().collect();
+        let mut stream = quiet;
+        stream.extend(sound(4_800));
+        let mut silence = processor(
+            &stream,
+            1_024,
+            vec![0],
+            SilenceOpts {
+                trim_leading: true,
+                ..SilenceOpts::default()
+            },
+        );
+
+        assert_eq!(
+            processed(&mut silence),
+            sound(4_800),
+            "with frames of {frame:?}"
+        );
+    }
+}
+
+#[test]
+fn nothing_asked_for_is_nothing_done() {
+    let mut stream = flat(4_096, 20);
+    stream.extend(sound(8_192));
+    stream.extend(flat(4_096, 20));
+    stream.extend(sound(4_096));
+    let handed_out = {
+        let source = Blocks::of(spec(RATE, CHANNELS), &stream, 1_024 * usize::from(CHANNELS));
+        blocks_of(&mut Pcm48::new(source).unwrap())
+    };
+    // Chapter starts on the seams between blocks, so that a stream nothing is done to comes out in
+    // the very blocks it went in as.
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 4_096, 16_384],
+        SilenceOpts::default(),
+    );
+
+    let blocks = processed_blocks(&mut silence);
+
+    assert_eq!(blocks, handed_out);
+    assert_eq!(adjusted(&silence), [0, 4_096, 16_384]);
+}
+
+#[test]
+fn every_chapter_is_final_before_the_first_frame_at_it_is_handed_out() {
+    let mut stream = flat(6_000, 20);
+    stream.extend(sound(18_000));
+    stream.extend(flat(12_000, 20));
+    stream.extend(sound(12_000));
+    stream.extend(sound(24_000));
+    // Blocks of 700 frames put both chapter starts inside a block rather than on a seam, so the
+    // processor has to cut its own blocks where a chapter begins.
+    let mut silence = processor(
+        &stream,
+        700,
+        vec![0, 24_000, 48_000],
+        SilenceOpts {
+            trim_each_chapter: true,
+            add_pause_leading: 2_400,
+            add_pause_each_chapter: 4_800,
+            ..SilenceOpts::default()
+        },
+    );
+
+    // What was known after every block, against where that block began.
+    let mut history: Vec<(u64, Vec<u64>)> = Vec::new();
+    let mut emitted = 0;
+    for _ in 0..MOST_PROCESSED_BLOCKS {
+        assert!(
+            silence.adjusted_chapters().is_none(),
+            "the offsets were final while the stream was still running"
+        );
+        let Some(block) = silence.next_block().unwrap() else {
+            break;
+        };
+        let marks = silence.chapters_emitted().to_vec();
+        if let Some((_, before)) = history.last() {
+            assert!(
+                marks.starts_with(before),
+                "the chapters known so far are not a prefix of themselves: {before:?} then {marks:?}"
+            );
+        }
+        history.push((emitted, marks));
+        emitted += frames_in(&block);
+    }
+
+    let marks = adjusted(&silence);
+    assert_eq!(marks, [0, 25_200, 42_000]);
+    assert_eq!(emitted, 70_800);
+    assert_eq!(silence.chapters_emitted(), marks);
+    for (start, known) in &history {
+        // Every chapter at or in front of a block's first frame was known when that block came
+        // out, and no chapter that lies behind it was.
+        let due: Vec<u64> = marks.iter().copied().filter(|mark| mark <= start).collect();
+        assert_eq!(*known, due, "after the block at frame {start}");
+    }
+    // And no block spans a chapter start: every mark is the first frame of a block.
+    let starts: Vec<u64> = history.iter().map(|(start, _)| *start).collect();
+    for mark in &marks {
+        assert!(
+            starts.contains(mark),
+            "the chapter at {mark} sits inside a block instead of at the start of one"
+        );
+    }
+}
+
+#[test]
+fn the_skip_the_trim_and_the_pause_leave_exactly_the_pause_in_front_of_the_audio() {
+    // A worked example: `--skip-leading 4.4 --trim-pause-leading --add-pause-leading 1.0`
+    // yields exactly 1.0 s of silence before the first non-silent sample. 4.4 s of a jingle, then
+    // 2 s of the noise floor, then the book.
+    const SECOND: usize = 48_000;
+    let mut stream = sound(4 * SECOND + SECOND * 2 / 5);
+    stream.extend(flat(2 * SECOND, 40));
+    stream.extend(sound(10 * SECOND));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0],
+        SilenceOpts {
+            skip_leading: 4 * 48_000 + 48_000 * 2 / 5,
+            trim_leading: true,
+            add_pause_leading: 48_000,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(first_sound(&out), Some(SECOND));
+    assert_eq!(out, [flat(SECOND, 0), sound(10 * SECOND)].concat());
+    assert_eq!(adjusted(&silence), [0]);
+}
+
+#[test]
+fn a_chapter_the_skip_ran_past_begins_where_the_skip_ended() {
+    let stream = ramp(20_000);
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 1_000, 6_000],
+        SilenceOpts {
+            skip_leading: 5_000,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(out, stream[5_000 * usize::from(CHANNELS)..]);
+    // The two chapters the skip ran past have no frames of their own left, so both begin where the
+    // output does; the one behind it keeps its distance from there.
+    assert_eq!(adjusted(&silence), [0, 0, 1_000]);
+}
+
+#[test]
+fn a_stream_shorter_than_the_skip_comes_out_as_no_stream_at_all() {
+    let stream = ramp(1_000);
+    let mut silence = processor(
+        &stream,
+        128,
+        vec![0, 500],
+        SilenceOpts {
+            skip_leading: 4_800,
+            trim_each_chapter: true,
+            add_pause_leading: 4_800,
+            add_pause_each_chapter: 4_800,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let blocks = processed_blocks(&mut silence);
+
+    // No chapter ever began, so no pause was ever owed: a stream the skip outran is empty rather
+    // than a stretch of silence nobody asked to hear.
+    assert!(
+        blocks.is_empty(),
+        "the skipped-away stream handed out audio"
+    );
+    assert_eq!(adjusted(&silence), [0, 0]);
+}
+
+#[test]
+fn a_stream_with_no_chapters_has_nothing_to_trim_and_nowhere_to_put_a_pause() {
+    let mut stream = flat(4_800, 20);
+    stream.extend(sound(4_800));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        Vec::new(),
+        SilenceOpts {
+            skip_leading: 1_200,
+            trim_leading: true,
+            trim_each_chapter: true,
+            add_pause_leading: 4_800,
+            add_pause_each_chapter: 4_800,
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    // The skip is the one thing that is not a chapter's: it happens either way. Everything else
+    // hangs on a chapter start, and there is none.
+    assert_eq!(out, stream[1_200 * usize::from(CHANNELS)..]);
+    assert!(adjusted(&silence).is_empty());
+}
+
+#[test]
+fn what_lies_in_front_of_the_first_chapter_is_handed_through_untouched() {
+    // A chapter list that does not begin at zero: the frames in front of the first chapter belong
+    // to no chapter, so nothing is trimmed off them and no pause goes in front of them.
+    let mut stream = flat(2_400, 20);
+    stream.extend(flat(2_400, 20));
+    stream.extend(sound(4_800));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![2_400],
+        SilenceOpts {
+            trim_leading: true,
+            add_pause_leading: 1_200,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(
+        out,
+        [flat(2_400, 20), flat(1_200, 0), sound(4_800)].concat()
+    );
+    assert_eq!(adjusted(&silence), [2_400]);
+}
+
+#[test]
+fn trimming_every_chapter_trims_the_first_one_too() {
+    let mut stream = flat(4_800, 20);
+    stream.extend(sound(4_800));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0],
+        SilenceOpts {
+            trim_each_chapter: true,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    assert_eq!(out, sound(4_800));
+}
+
+#[test]
+fn the_leading_trim_is_the_first_chapters_alone() {
+    let mut stream = flat(2_400, 20);
+    stream.extend(sound(2_400));
+    stream.extend(flat(2_400, 20));
+    stream.extend(sound(2_400));
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 4_800],
+        SilenceOpts {
+            trim_leading: true,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    // The first chapter's silence is gone and the second chapter's is not.
+    assert_eq!(out, [sound(2_400), flat(2_400, 20), sound(2_400)].concat());
+    assert_eq!(adjusted(&silence), [0, 2_400]);
+}
+
+#[test]
+fn both_pauses_go_in_at_the_first_chapter() {
+    let stream = sound(9_600);
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 4_800],
+        SilenceOpts {
+            add_pause_leading: 1_200,
+            add_pause_each_chapter: 2_400,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    // The first chapter is given both, every other chapter only the one that is every chapter's.
+    assert_eq!(
+        out,
+        [flat(3_600, 0), sound(4_800), flat(2_400, 0), sound(4_800),].concat()
+    );
+    assert_eq!(adjusted(&silence), [0, 8_400]);
+}
+
+#[test]
+fn a_pause_is_handed_out_a_tenth_of_a_second_at_a_time() {
+    let stream = sound(4_800);
+    let mut silence = processor(
+        &stream,
+        4_800,
+        vec![0],
+        SilenceOpts {
+            add_pause_leading: 48_000,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let blocks = processed_blocks(&mut silence);
+
+    // A second of silence is ten blocks of a tenth of a second, and then the audio: a pause of any
+    // length costs one small block at a time rather than one allocation the size of the pause.
+    assert_eq!(blocks.len(), 11);
+    for block in blocks.iter().take(10) {
+        assert_eq!(frames_in(block), 4_800);
+    }
+    assert_eq!(blocks.concat(), [flat(48_000, 0), sound(4_800)].concat());
+}
+
+#[test]
+fn a_processed_stream_that_has_ended_stays_ended() {
+    let stream = sound(2_400);
+    let mut silence = processor(&stream, 1_024, vec![0], SilenceOpts::default());
+
+    processed_blocks(&mut silence);
+
+    assert!(silence.next_block().unwrap().is_none());
+    assert!(silence.next_block().unwrap().is_none());
+    assert_eq!(adjusted(&silence), [0]);
+}
+
+#[test]
+fn a_source_of_no_samples_at_all_comes_out_as_no_stream_and_leaves_its_chapters_at_the_end() {
+    let mut silence = processor(
+        &[],
+        1_024,
+        vec![0, 4_800],
+        SilenceOpts {
+            add_pause_leading: 4_800,
+            add_pause_each_chapter: 4_800,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let blocks = processed_blocks(&mut silence);
+
+    // A chapter with no frame of its own left to begin on gets no pause: there is nothing there to
+    // put a pause in front of.
+    assert!(blocks.is_empty(), "a source of no samples handed out audio");
+    assert_eq!(adjusted(&silence), [0, 0]);
+}
+
+#[test]
+fn a_chapter_at_the_end_of_the_stream_lands_at_the_end_of_the_output() {
+    let stream = sound(4_800);
+    let mut silence = processor(
+        &stream,
+        1_024,
+        vec![0, 4_800, 9_600],
+        SilenceOpts {
+            add_pause_each_chapter: 1_200,
+            ..SilenceOpts::default()
+        },
+    );
+
+    let out = processed(&mut silence);
+
+    // Only the first chapter has a frame of its own, so only it is given a pause; the two behind
+    // the end of the stream land where the output ended.
+    assert_eq!(out, [flat(1_200, 0), sound(4_800)].concat());
+    assert_eq!(adjusted(&silence), [0, 6_000, 6_000]);
+}
+
+#[test]
+fn a_source_that_fails_to_decode_fails_the_processor_with_it() {
+    let broken = open_source(Box::new(Cursor::new(fixtures::broken_adpcm_wav()))).unwrap();
+    let mut silence =
+        SilenceProcessor::new(Pcm48::new(broken).unwrap(), vec![0], SilenceOpts::default());
+
+    let block = silence.next_block();
+
+    assert!(
+        matches!(block, Err(PcmError::Decode(DecodeError::Decode(_)))),
+        "undecodable audio came out of the processor as {:?}",
+        block.map(|block| block.map(|samples| samples.len()))
+    );
+    assert!(silence.adjusted_chapters().is_none());
 }
