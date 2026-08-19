@@ -404,14 +404,10 @@ impl<D: Sha1> Stream<D> {
             return Ok(());
         };
 
-        // What the last packet has to grow to for the page to come to its target length. A packet
-        // already that long — the one that filled the page exactly — is written as it is.
-        let filling = packet_filling(room);
-        let padded = if last.bytes.len() < filling {
-            Some(pad_to(&last.bytes, filling).map_err(WriterError::Pad)?)
-        } else {
-            None
-        };
+        // The last packet grows to fill the room it was pushed into, which is what brings the page
+        // to its target length. A packet already that long — the one that filled the page to the
+        // byte — comes back from this as the bytes it already was.
+        let padded = pad_to(&last.bytes, packet_filling(room)).map_err(WriterError::Pad)?;
 
         // The granule position states the samples of every packet the file carries up to and
         // including this page — the ones this page does not take are the next page's.
@@ -428,8 +424,7 @@ impl<D: Sha1> Stream<D> {
             page.push_packet(&packet.bytes)
                 .map_err(WriterError::Build)?;
         }
-        page.push_packet(padded.as_deref().unwrap_or(&last.bytes))
-            .map_err(WriterError::Build)?;
+        page.push_packet(&padded).map_err(WriterError::Build)?;
         let page = page.finish();
 
         self.emit_page(&page, emit)?;
