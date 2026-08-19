@@ -164,8 +164,46 @@ impl<'a> Tags<'a> {
 ///
 /// The packets are the caller's: nothing here encodes audio or checks that a packet is Opus at all.
 /// What the writer does with them is decide where pages end, which means padding the last packet of
-/// a page (RFC 6716 packet padding, see [`pad_to`](crate::opus_packet::pad_to)) until the page
-/// closes its block.
+/// a page (RFC 6716 packet padding, see [`pad_to`]) until the page closes its block.
+///
+/// # Examples
+///
+/// ```
+/// use taf::digest::Sha1;
+/// use taf::header::{HeaderView, BLOCK_LEN};
+/// use taf::id::AudioId;
+/// use taf::writer::{TafWriter, Tags};
+///
+/// // The digest is the caller's too — `taf` states what it needs from one and implements none.
+/// struct Digest(sha1::Sha1);
+/// impl Sha1 for Digest {
+///     fn update(&mut self, data: &[u8]) {
+///         sha1::Digest::update(&mut self.0, data);
+///     }
+///     fn finalize(self) -> [u8; 20] {
+///         sha1::Digest::finalize(self.0).into()
+///     }
+/// }
+///
+/// let mut audio: Vec<u8> = Vec::new();
+/// let mut writer = TafWriter::new(
+///     Digest(<sha1::Sha1 as sha1::Digest>::new()),
+///     AudioId::new(444_913_029),
+///     Tags::new("taffle", &["version=0.1.0"]),
+///     |page| audio.extend_from_slice(page),
+/// )?;
+///
+/// // One Opus packet, carrying the 2880 samples of one channel that 60 ms holds at 48 kHz.
+/// writer.add_packet(&[0x0c, 0xaa, 0xbb], 2880)?;
+/// let block = writer.finalize()?;
+///
+/// // The audio region came out a whole block, and the header block describes it.
+/// assert_eq!(audio.len(), BLOCK_LEN);
+/// let header = HeaderView::parse(&block)?;
+/// assert_eq!(header.data_length(), 4096);
+/// assert_eq!(header.chapter_count(), 1);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct TafWriter<D: Sha1, F: FnMut(&[u8])> {
     stream: Stream<D>,
     emit: F,

@@ -82,6 +82,25 @@ impl<'a> PageView<'a> {
     /// - [`PageError::TruncatedBody`] if the lacing table, or the segments it describes, reach
     ///   past the end of the slice.
     /// - [`PageError::BadCrc`] if the page's checksum does not match the bytes it covers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use taf::ogg::PageView;
+    ///
+    /// # let file = include_bytes!("../../tests/fixtures/golden-sine.taf");
+    /// // A TAF's audio region starts at offset 4096, with the page carrying `OpusHead`.
+    /// let view = PageView::parse(&file[4096..])?;
+    ///
+    /// assert!(view.is_first());
+    /// assert_eq!(view.total_len(), 47);
+    /// assert_eq!(view.packets().next().map(|packet| packet.len()), Some(19));
+    ///
+    /// // Stepping on by what a page occupies lands on the next one.
+    /// let next = PageView::parse(&file[4096 + view.total_len()..])?;
+    /// assert_eq!(next.sequence(), 1);
+    /// # Ok::<(), taf::ogg::PageError>(())
+    /// ```
     pub fn parse(page: &'a [u8]) -> Result<Self, PageError> {
         let header: &[u8; HEADER_LEN] = page.first_chunk().ok_or(PageError::TooShort)?;
 
@@ -202,8 +221,8 @@ impl<'a> PageView<'a> {
 ///
 /// A page whose *last* lacing value is 255 ends on a packet it does not finish: RFC 3533 has that
 /// packet carried on by the next page, which marks itself with the continued-packet flag (0x01).
-/// Only whole packets are yielded here, so iteration ends at such a run rather than handing out a
-/// fragment.
+/// Only packets the page itself completes are yielded here, so iteration ends at such a run rather
+/// than handing out the piece of one the page began.
 ///
 /// The other end of that packet is not interpreted at all: on a page that states the
 /// continued-packet flag, the first packet yielded here is the fragment that finishes what the

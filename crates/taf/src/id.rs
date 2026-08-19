@@ -5,9 +5,10 @@ use core::fmt;
 /// The audio id of a TAF file: the header's `audio_id` field, and the serial number of every
 /// Ogg page in the file.
 ///
-/// teddycloud writes a Unix timestamp here, but nothing in the format depends on that, so every
-/// `u32` is a valid audio id and construction cannot fail. Fallibility belongs where ids are
-/// read out of files, not here.
+/// teddycloud derives what it writes here from the clock — `time(NULL) - 0x50000000`, a Unix
+/// timestamp with a fixed offset taken off it — but nothing in the format depends on that, so
+/// every `u32` is a valid audio id and construction cannot fail. Fallibility belongs where ids
+/// are read out of files, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AudioId(u32);
 

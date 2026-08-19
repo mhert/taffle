@@ -85,4 +85,15 @@ mod tests {
         Sha1::update(&mut d, b"abc");
         assert_eq!(d.finalize(), ABC);
     }
+
+    #[test]
+    fn digest_trait_contract_holds_when_the_message_arrives_in_pieces() {
+        // The other half of what the trait states: a message fed in several calls hashes to what
+        // the same message fed in one does.
+        let mut d = RustCrypto(<sha1::Sha1 as sha1::Digest>::new());
+        Sha1::update(&mut d, b"a");
+        Sha1::update(&mut d, b"bc");
+
+        assert_eq!(d.finalize(), ABC);
+    }
 }

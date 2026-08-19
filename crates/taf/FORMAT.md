@@ -154,6 +154,12 @@ Step 4 is dead code: `d2` is only ever 4092 or 4091, and the decrement it perfor
 reflected in the `d2` that step 5 tests, so a hypothetical 4093 would be rejected rather than
 fixed. Do not model an implementation on it.
 
+The 4091 branch is unreachable in teddycloud-written files: *R* is bounded by the 99-chapter cap
+— 99 packed varints of at most 5 bytes each, plus the ~50 bytes the other fields take — and so
+tops out around 550, nowhere near 3962. Every observed file states 4092. A decoder must accept
+4091 all the same: nothing in the format forbids a writer that reaches it, and the branch is in
+teddycloud's own writer.
+
 Implementation guidance for the encoder side: compute the fill length so the packed message is
 exactly 4092, and when that is impossible fall back to 4091 + one zero pad byte. A decoder
 must accept both.
@@ -173,9 +179,10 @@ Independently, the CLI refuses more than 99 source files
 are fixed at 99 entries: `char multisource[99][PATH_LEN]` (`src/main.c:254`), passed to
 `ffmpeg_convert(char source[99][PATH_LEN], …)` (`include/toniefile.h:68-69`).
 
-The header block imposes a second, softer limit: the packed chapter list plus the fixed fields
-must fit in 4092 bytes. With ~35 bytes of fixed fields that is thousands of entries, so 99 is
-the binding limit in practice.
+The header block imposes a second, softer limit: the packed chapter list plus the fields around
+it must fit in 4092 bytes. Everything but `_fill` measures **46–52 bytes** in the three fixtures
+(*R* above — fields 1–4 and 6–9, chapter lists of 1 to 3 entries included), so a list may run to
+thousands of entries before the block runs out, and 99 is the binding limit in practice.
 
 ## Audio region (offset 4096 to EOF)
 
@@ -296,10 +303,11 @@ padding". At 0 the page is flushed and written, and `taf_block_num` is increment
 The two `page_remain` computations are not the same expression: the pre-encode one subtracts
 the already-returned lacing/body bytes (`lacing_fill - lacing_returned + body_fill -
 body_returned`, `src/toniefile.c:421`) while the post-queue recompute omits the subtraction
-(`lacing_fill + body_fill`, `src/toniefile.c:488`). They agree only because the post-queue
-value is used solely in the `== 0` test, and a page is flushed the moment it is full, so
-nothing has been returned while a page is still filling. An implementation that tracks only
-pending bytes reproduces both.
+(`lacing_fill + body_fill`, `src/toniefile.c:488`). They agree because those returned counters
+are 0 whenever either expression is evaluated — a page is flushed the moment it is full, so
+nothing has been returned while a page is still filling — which is what makes the post-queue
+value right for both tests it feeds, the `< 64` one as well as the `== 0` one. An
+implementation that tracks only pending bytes reproduces both.
 
 Worked example, golden fixture page 2 (`file_pos = 4608`): `page_used = 512 + 27 = 539`,
 `page_remain = 3557`, `frame_payload = 13*255 + 229 - 1 = 3543`, `reconstructed = 3557` (no

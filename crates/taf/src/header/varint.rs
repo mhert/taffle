@@ -130,6 +130,15 @@ mod tests {
     }
 
     #[test]
+    fn accepts_an_over_long_encoding_of_a_small_value() {
+        // What the doc promises the other way round from the rejections below: continuation bytes
+        // carrying no bits are read as the value they pad out, and the length says how many there
+        // were.
+        assert_eq!(decode_u64(&[0x80, 0x80, 0x80, 0x80, 0x00]), Ok((0, 5)));
+        assert_eq!(decode_u32(&[0x81, 0x00]), Ok((1, 2)));
+    }
+
+    #[test]
     fn rejects_a_six_byte_u32_varint() {
         assert_eq!(
             decode_u32(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]),

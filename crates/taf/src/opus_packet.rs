@@ -39,7 +39,7 @@ impl fmt::Display for PadError {
             }
             Self::TargetTooLarge => write!(
                 f,
-                "an Opus packet cannot be padded past the {MAX_PADDED_LEN} bytes an Ogg page carries"
+                "an Opus packet cannot be padded past the {MAX_PADDED_LEN} bytes an Ogg page's lacing table describes"
             ),
             Self::MalformedToc => {
                 f.write_str("an Opus packet does not divide into the frames its TOC byte states")
@@ -143,6 +143,29 @@ const FRAMING_LEN: usize = 2;
 ///   packet with no frame count byte, one stating no frames or more than 48 `[R5]`, one whose
 ///   padding run does not end inside it or overruns it `[R6,R7]`, or a CBR code 3 packet whose
 ///   bytes do not divide by its frame count `[R6]`.
+///
+/// Padding a packet to the length it already has is the one path that never looks inside it: the
+/// bytes come back as they were handed in, so a packet that does not divide into the frames its
+/// TOC byte states is returned rather than reported as [`PadError::MalformedToc`]. Only
+/// [`PadError::EmptyPacket`] and [`PadError::TargetTooLarge`] — which are about the bytes
+/// themselves rather than their framing — are still reported there.
+///
+/// # Examples
+///
+/// ```
+/// use taf::opus_packet::pad_to;
+///
+/// // A code 0 packet: a TOC byte, and the one frame behind it.
+/// let packet = [0x0c, 0xaa, 0xbb];
+/// let padded = pad_to(&packet, 16)?;
+///
+/// assert_eq!(padded.len(), 16);
+/// // Framed again as code 3 — one frame, padding stated behind the frame count byte — with the
+/// // configuration and the frame itself carried over byte for byte.
+/// assert_eq!(&padded[..5], &[0x0f, 0x41, 0x0b, 0xaa, 0xbb]);
+/// assert!(padded[5..].iter().all(|&byte| byte == 0));
+/// # Ok::<(), taf::opus_packet::PadError>(())
+/// ```
 pub fn pad_to(packet: &[u8], target_len: usize) -> Result<Vec<u8>, PadError> {
     let (&toc, payload) = packet.split_first().ok_or(PadError::EmptyPacket)?;
 
@@ -640,6 +663,16 @@ mod tests {
             [TOC | 1, 7, 9],
             "a code 1 packet of two one-byte frames"
         );
+
+        // And the packet is not taken apart on the way either: one that does not divide into the
+        // frames its TOC byte states comes back as it was, where padding it by a byte would refuse
+        // it as `MalformedToc`.
+        let odd_halves = [TOC | 1, 1, 2, 3];
+        assert_eq!(pad_to(&odd_halves, odd_halves.len()).unwrap(), odd_halves);
+        assert_eq!(
+            pad_to(&odd_halves, odd_halves.len() + 1),
+            Err(PadError::MalformedToc)
+        );
     }
 
     #[test]
@@ -1083,7 +1116,7 @@ mod tests {
             [
                 "an Opus packet is at least one byte",
                 "an Opus packet cannot be padded to fewer bytes than it has",
-                "an Opus packet cannot be padded past the 65024 bytes an Ogg page carries",
+                "an Opus packet cannot be padded past the 65024 bytes an Ogg page's lacing table describes",
                 "an Opus packet does not divide into the frames its TOC byte states",
             ]
         );

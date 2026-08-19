@@ -209,7 +209,10 @@ pub struct ChapterInfo {
     /// The block the chapter starts at, as the header states it.
     pub block: BlockIndex,
     /// The granule position the chapter's audio begins at: the samples of one channel that the
-    /// pages before its block carry, so `granule / 48_000` is where the chapter starts in seconds.
+    /// pages before its block carry, raw, with the Opus pre-skip counted in the way
+    /// [`Summary::total_samples`] counts it. Seconds into the audio means taking that pre-skip off
+    /// first — except at a file's first chapter, whose granule is 0 because no page comes before
+    /// it and whose audio is where the file starts.
     pub granule: u64,
 }
 
@@ -218,12 +221,16 @@ pub struct ChapterInfo {
 pub struct Summary {
     /// The Ogg pages the region holds.
     pub pages: u32,
-    /// The granule position its last page states: the samples of one channel the file plays,
-    /// which at 48 kHz is `total_samples / 48_000` seconds.
+    /// The granule position the region's last page states, raw: the samples of one channel the
+    /// file carries, the Opus pre-skip counted in with them.
     ///
-    /// This is the raw granule the file states, with the Opus pre-skip left in it — and it is what
-    /// the file *carries*, which is up to a block less than what teddycloud handed its encoder,
-    /// since teddycloud drops whatever it still has buffered when it closes a file.
+    /// A player takes that pre-skip off before it counts seconds — [`OPUS_PRE_SKIP`] samples in
+    /// every TAF — so the audio runs `(total_samples - 312) / 48_000` seconds at the 48 kHz a TAF
+    /// is encoded at. And it is what the file *carries*, which is up to a block less than what
+    /// teddycloud handed its encoder, since teddycloud drops whatever it still has buffered when
+    /// it closes a file.
+    ///
+    /// [`OPUS_PRE_SKIP`]: crate::ogg::OPUS_PRE_SKIP
     pub total_samples: u64,
     /// The bytes the region occupies, which the header states and the walk found it to have.
     pub audio_bytes: u32,
@@ -245,6 +252,34 @@ pub struct Summary {
 /// count towards the file, so a caller that pushed the wrong bytes can push the right ones and
 /// carry on — and a caller that stops at the first error leaves a validator that reports the file
 /// as short, which it is.
+///
+/// # Examples
+///
+/// ```
+/// use taf::header::{HeaderView, BLOCK_LEN};
+/// use taf::reader::Validator;
+///
+/// # let file = include_bytes!("../tests/fixtures/golden-sine.taf");
+/// // A TAF file: the header block, and behind it the audio region in blocks of its own.
+/// let header = HeaderView::parse(&file[..BLOCK_LEN])?;
+/// let mut validator = Validator::new(&header);
+/// let mut chapters = Vec::new();
+///
+/// for block in file[BLOCK_LEN..].chunks(BLOCK_LEN) {
+///     if let Some(chapter) = validator.push_block(block, None)? {
+///         chapters.push(chapter.block.get());
+///     }
+/// }
+///
+/// // Finishing without a hash checks the file's structure and leaves its SHA-1 alone; a caller
+/// // that fed a digest along the way hands the hash it finalized in here instead.
+/// let summary = validator.finish(None)?;
+///
+/// assert_eq!(summary.pages, 29);
+/// assert_eq!(summary.audio_bytes, 110_592);
+/// assert_eq!(chapters, [0]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct Validator<'h> {
     /// What the header states the audio region hashes to.

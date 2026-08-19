@@ -126,8 +126,11 @@ mod tests {
 
     #[test]
     fn matches_the_check_value_of_this_crc_variant() {
-        // The value the CRC catalogue states for `123456789` under these parameters, which is
-        // what tells this variant apart from the reflected CRC-32 everything else uses.
+        // What `123456789` sums to under these parameters, which is what tells this variant apart
+        // from the reflected CRC-32 everything else uses. The CRC catalogue lists no entry for
+        // them — every listed variant of this polynomial reflects or xors something — so the value
+        // is CRC-32/CKSUM's check value 0x765e7680 with that variant's 0xffffffff xorout undone,
+        // which is this sum reached from a catalogued number.
         assert_eq!(crc32(b"123456789"), 0x89a1_897f);
     }
 

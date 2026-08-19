@@ -117,9 +117,9 @@ impl fmt::Display for HeaderError {
                     "TAF header message is longer than {MAX_MESSAGE_LEN} bytes"
                 )
             }
-            Self::TruncatedField => {
-                f.write_str("a TAF header field reaches past the end of the header message")
-            }
+            Self::TruncatedField => f.write_str(
+                "a TAF header field reaches past the end of the header message, or its hash is not 20 bytes long",
+            ),
             Self::MissingField(field) => write!(f, "TAF header field {field} is missing"),
             Self::DuplicateField(field) => {
                 write!(f, "TAF header field {field} appears more than once")
@@ -179,6 +179,22 @@ impl<'a> HeaderView<'a> {
     /// - [`HeaderError::VarintOverflow`] if a varint carries more bits than its field holds.
     /// - [`HeaderError::FieldOutOfRange`] if the audio length does not fit a `u32`. It is a
     ///   `uint64` on the wire, but the format bounds it at 2 147 479 551 bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use taf::header::{HeaderView, BLOCK_LEN};
+    ///
+    /// # let file = include_bytes!("../../tests/fixtures/golden-sine.taf");
+    /// // The block a TAF file starts with, all 4096 bytes of it.
+    /// let view = HeaderView::parse(&file[..BLOCK_LEN])?;
+    ///
+    /// assert_eq!(view.audio_id().get(), 444_913_029);
+    /// assert_eq!(view.data_length(), 110_592);
+    /// // Every TAF starts a chapter at block 0.
+    /// assert_eq!(view.chapter_pages().next().map(|start| start.get()), Some(0));
+    /// # Ok::<(), taf::header::HeaderError>(())
+    /// ```
     pub fn parse(block: &'a [u8]) -> Result<Self, HeaderError> {
         let block: &'a [u8; BLOCK_LEN] =
             block.try_into().map_err(|_| HeaderError::WrongBlockLen)?;
@@ -364,18 +380,42 @@ impl std::error::Error for EncodeHeaderError {}
 /// nothing — and [`HeaderView::parse`] reads that back as no chapters.
 ///
 /// The fill is sized so the message fills the block exactly, except in the one case where no
-/// fill length lands on it: then the message is a byte shorter, the prefix says so, and the
-/// block's last byte is padding. teddycloud's writer has the same one-byte wobble, and readers
-/// accept both.
+/// fill length lands on it — a message whose other fields come to exactly 3962 bytes: then the
+/// message is a byte shorter, the prefix says so, and the block's last byte is padding.
+/// teddycloud's writer leaves a message a byte short over a wider range than that, since it
+/// shrinks the fill rather than sizing it: every header whose other fields come to 3962 bytes or
+/// more. Both lengths are ones a reader accepts, so the two writers agree on what they produce
+/// without producing the same byte count everywhere.
 ///
-/// How many chapters a file may have is a question for whoever writes the file — the format's
-/// own limit is 99 — so only what a block can hold is checked here.
+/// What a file's chapter list holds is a question for whoever writes the file: the format's own
+/// limit is 99 chapters, and every TAF a box plays starts one at block 0. Neither is enforced
+/// here — only what a block can hold is.
 ///
 /// # Errors
 ///
 /// [`EncodeHeaderError::TooManyChapters`] if the packed chapter list and the fields around it
 /// leave the fill no room in the 4092 bytes a header message has. That takes eight hundred
 /// chapters at the very least, far past the 99 the format allows.
+///
+/// # Examples
+///
+/// ```
+/// use taf::header::{encode_header, HeaderView, BLOCK_LEN};
+/// use taf::id::AudioId;
+///
+/// let sha1 = [0x11; 20];
+/// let block = encode_header(&sha1, 110_592, AudioId::new(444_913_029), &[0, 27])?;
+///
+/// assert_eq!(block.len(), BLOCK_LEN);
+/// // The fill is sized so the message fills the block, and the prefix states how long it is.
+/// assert_eq!(&block[..4], &4092_u32.to_be_bytes());
+///
+/// // What comes back out of the block is what went into it.
+/// let view = HeaderView::parse(&block)?;
+/// assert_eq!(view.data_length(), 110_592);
+/// assert_eq!(view.chapter_count(), 2);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn encode_header(
     sha1: &[u8; SHA1_LEN],
     data_length: u32,
@@ -1155,7 +1195,7 @@ mod tests {
             [
                 "TAF header block is not 4096 bytes long",
                 "TAF header message is longer than 4092 bytes",
-                "a TAF header field reaches past the end of the header message",
+                "a TAF header field reaches past the end of the header message, or its hash is not 20 bytes long",
                 "TAF header field 1 is missing",
                 "TAF header field 2 appears more than once",
                 "TAF header field 3 has an unreadable wire type",
