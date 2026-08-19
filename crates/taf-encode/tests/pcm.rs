@@ -133,6 +133,18 @@ fn tone(frames: u32, rate: u32, channels: u16, peak: i16) -> Vec<i16> {
     samples
 }
 
+/// The same wave on both channels at peaks a factor of two apart — the WAV fixture's own shape, so
+/// that a stage which lost track of which side a sample is on is plain to see.
+fn two_sided_tone(frames: u32, rate: u32) -> Vec<i16> {
+    let left = tone(frames, rate, 1, fixtures::LEFT_PEAK);
+    let right = tone(frames, rate, 1, fixtures::RIGHT_PEAK);
+
+    left.iter()
+        .zip(&right)
+        .flat_map(|(left, right)| [*left, *right])
+        .collect()
+}
+
 /// A square wave of `frames` frames whose halves are `half` frames long, at full scale on both
 /// channels: the one signal whose every edge asks the filter behind a resampler to overshoot.
 fn square(frames: u32, half: usize) -> Vec<i16> {
@@ -597,5 +609,82 @@ fn a_source_that_fails_to_decode_fails_the_stage_with_it() {
         matches!(block, Err(PcmError::Decode(DecodeError::Decode(_)))),
         "undecodable audio came out of the stage as {:?}",
         block.map(|block| block.map(|samples| samples.len()))
+    );
+}
+
+#[test]
+fn the_frame_a_source_ended_mid_way_through_never_reaches_the_filter() {
+    // Silence with one full-scale sample behind the last whole frame: a source that stopped in the
+    // middle of a frame. That sample is not audio — it is one side of a frame that has no other
+    // side — and it is as loud as a sample gets, so a resampler that took it in would spread it
+    // over a hundred frames of what has to come out silent.
+    //
+    // The frame count leaves 900 frames over the last whole chunk, which at the slow end of the
+    // band is more tail than one turn of the resampler gives back: the frames that are left over
+    // stay where they are while the stream is pushed out, so a turn that read past them would read
+    // the same sample again at another place in the stream.
+    const FRAMES: u32 = 44_932;
+
+    for rate in [fixtures::SAMPLE_RATE, 480_000] {
+        let mut samples = vec![0; FRAMES as usize * usize::from(CHANNELS)];
+        samples.push(i16::MAX);
+        let mut pcm = Pcm48::new(Blocks::of(spec(rate, CHANNELS), &samples, 4_096)).unwrap();
+
+        let stream = stream_of(&mut pcm);
+
+        assert_eq!(frames_in(&stream), pcm.scale_samples(u64::from(FRAMES)));
+        let loudest = stream.iter().map(|sample| i32::from(*sample).abs()).max();
+        assert_eq!(
+            loudest,
+            Some(0),
+            "the orphan sample of a source at {rate} Hz reached the filter"
+        );
+    }
+}
+
+#[test]
+fn where_a_source_cut_its_blocks_does_not_reach_the_resampled_stream() {
+    // The same second of tone at 44 100 Hz twice: once in blocks of whole frames, once in blocks
+    // of an odd number of samples, so that every one of them ends in the middle of a frame and
+    // the frame is finished by the block behind it. A resampler that dropped, repeated or shifted
+    // a sample at a seam does not come out the same both ways — and the two channels, a factor of
+    // two apart in level, say which side it went wrong on.
+    const FRAMES: u32 = 44_100;
+    let samples = two_sided_tone(FRAMES, fixtures::SAMPLE_RATE);
+    let mut whole = Pcm48::new(Blocks::of(
+        spec(fixtures::SAMPLE_RATE, CHANNELS),
+        &samples,
+        4_096,
+    ))
+    .unwrap();
+    let mut split = Pcm48::new(Blocks::of(
+        spec(fixtures::SAMPLE_RATE, CHANNELS),
+        &samples,
+        333,
+    ))
+    .unwrap();
+
+    let from_whole_blocks = stream_of(&mut whole);
+    let from_split_frames = stream_of(&mut split);
+
+    assert_eq!(from_split_frames, from_whole_blocks);
+    assert_eq!(
+        frames_in(&from_split_frames),
+        split.scale_samples(u64::from(FRAMES))
+    );
+    // And the channels are still the ones they went in as, at the levels they went in at.
+    let left = peak_of(&from_split_frames, 0);
+    let right = peak_of(&from_split_frames, 1);
+    let (left_peak, right_peak) = (
+        i32::from(fixtures::LEFT_PEAK),
+        i32::from(fixtures::RIGHT_PEAK),
+    );
+    assert!(
+        (left_peak - left_peak / 100..=left_peak + left_peak / 100).contains(&left),
+        "the left channel peaks at {left}, not within a percent of {left_peak}"
+    );
+    assert!(
+        (right_peak - right_peak / 100..=right_peak + right_peak / 100).contains(&right),
+        "the right channel peaks at {right}, not within a percent of {right_peak}"
     );
 }

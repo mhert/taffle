@@ -190,6 +190,11 @@ impl Resampler48 {
     /// One turn of the resampler: a chunk of what is pending, zeros behind it where the source has
     /// run out, and what comes back kept for handing out.
     ///
+    /// What goes in is whole frames and no more of them than a turn takes. A source that stopped in
+    /// the middle of a frame left a sample that is one side of a frame with no other side: putting
+    /// it in would play it against silence on the side it does not have, and — since a turn only
+    /// takes whole frames away — put it in again at another place in the stream on the next turn.
+    ///
     /// # Errors
     ///
     /// [`PcmError::Resample`] as the resampler stated it. Every turn is a chunk of exactly the
@@ -197,11 +202,11 @@ impl Resampler48 {
     fn turn(&mut self) -> Result<(), PcmError> {
         let taken = CHUNK.min(self.pending_frames());
         let channels = self.channels;
-        let pending = &self.pending;
+        let frames = self.pending.get(..taken * channels).unwrap_or_default();
 
         for (channel, samples) in self.planar.iter_mut().enumerate() {
             for (frame, sample) in samples.iter_mut().enumerate() {
-                *sample = pending
+                *sample = frames
                     .get(frame * channels + channel)
                     .map_or(0.0, |source| from_i16(*source));
             }
