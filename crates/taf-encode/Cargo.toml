@@ -6,5 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+sha1 = { workspace = true }
+symphonia = { version = "0.5", features = [
+    "mp3",
+    "aac",
+    "isomp4",
+    "wav",
+    "flac",
+    "ogg",
+    "vorbis",
+] }
+taf = { workspace = true }
+thiserror = { workspace = true }
+
 [lints]
 workspace = true
