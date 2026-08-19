@@ -19,6 +19,14 @@ pub use page::{Packets, PageError, PageView};
 #[cfg(feature = "alloc")]
 pub(crate) use build::{packet_cost, MAX_SEGMENTS, SEGMENT_LEN};
 
+/// What the two packets a stream opens with start with, which is how a reader tells an Opus
+/// stream — and so a TAF — from any other Ogg stream.
+pub(crate) use build::{OPUS_HEAD_MAGIC, OPUS_TAGS_MAGIC};
+
+/// The checksum a page states, which the reader's tests sum broken pages with again.
+#[cfg(test)]
+pub(crate) use crc::crc32;
+
 use crate::header::BLOCK_LEN;
 
 /// The length of an aligned Ogg page, which is exactly one [`BLOCK_LEN`] block.
@@ -44,6 +52,13 @@ const CHECKSUM_AT: usize = 22;
 
 /// The bytes the checksum occupies.
 const CHECKSUM_LEN: usize = 4;
+
+/// The type flag that says the page's first packet finishes one the page before it began.
+///
+/// No page of a TAF states it: teddycloud pads the last packet of every page so that pages end on
+/// packet boundaries, and a packet spanning two pages would span two blocks — which is exactly
+/// what a box seeking to a chapter block may not run into.
+const FLAG_CONTINUED: u8 = 0x01;
 
 /// The type flag that marks the first page of a stream.
 const FLAG_FIRST: u8 = 0x02;

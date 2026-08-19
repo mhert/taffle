@@ -54,10 +54,10 @@ pub const OPUS_TAGS_LEN: usize = 436;
 pub const OPUS_PRE_SKIP: u16 = 312;
 
 /// The magic an `OpusHead` packet starts with.
-const OPUS_HEAD_MAGIC: &[u8; 8] = b"OpusHead";
+pub(crate) const OPUS_HEAD_MAGIC: &[u8; 8] = b"OpusHead";
 
 /// The magic an `OpusTags` packet starts with.
-const OPUS_TAGS_MAGIC: &[u8; 8] = b"OpusTags";
+pub(crate) const OPUS_TAGS_MAGIC: &[u8; 8] = b"OpusTags";
 
 /// The one version of the Opus header a TAF states.
 const OPUS_VERSION: u8 = 1;

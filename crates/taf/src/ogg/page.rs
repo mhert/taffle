@@ -4,7 +4,8 @@ use core::fmt;
 
 use super::crc::{crc32, crc32_from};
 use super::{
-    CHECKSUM_AT, CHECKSUM_LEN, CONTINUES, FLAG_FIRST, FLAG_LAST, HEADER_LEN, MAGIC, VERSION,
+    CHECKSUM_AT, CHECKSUM_LEN, CONTINUES, FLAG_CONTINUED, FLAG_FIRST, FLAG_LAST, HEADER_LEN, MAGIC,
+    VERSION,
 };
 
 /// Why an Ogg page could not be read.
@@ -68,8 +69,9 @@ impl<'a> PageView<'a> {
     /// The continued-packet flag (0x01) is not interpreted: a page that states it starts with the
     /// tail of a packet the page before it began, and [`packets`](PageView::packets) hands that
     /// tail out as if it were a packet of its own. Joining it to its head is the caller's
-    /// business, and a TAF never asks for it — teddycloud ends every page on a packet boundary
-    /// and sets the flag nowhere.
+    /// business — [`is_continued`](PageView::is_continued) is how a caller learns it has one to do
+    /// — and a TAF never asks for it: teddycloud ends every page on a packet boundary and sets the
+    /// flag nowhere.
     ///
     /// # Errors
     ///
@@ -142,6 +144,18 @@ impl<'a> PageView<'a> {
     #[must_use]
     pub const fn sequence(&self) -> u32 {
         self.sequence
+    }
+
+    /// Returns whether the page's first packet finishes one the page before it began — the
+    /// continued-packet flag.
+    ///
+    /// Nothing here joins the two halves: [`packets`](PageView::packets) hands the fragment out as
+    /// if it were a packet of its own either way. What this answers is whether it is one. No page
+    /// of a TAF states the flag, so a reader of TAF files reads this to reject a file rather than
+    /// to piece one together.
+    #[must_use]
+    pub const fn is_continued(&self) -> bool {
+        self.flags & FLAG_CONTINUED != 0
     }
 
     /// Returns whether the page is the first of its stream — the BOS flag.
@@ -275,12 +289,6 @@ mod tests {
     /// The samples per channel one Opus frame carries, which every page's granule advances by a
     /// multiple of.
     const SAMPLES_PER_FRAME: u64 = 2880;
-
-    /// The type flag a page states when its first packet finishes one the page before it began.
-    ///
-    /// It lives here rather than beside the other flags because nothing in the crate reads it: a
-    /// TAF never states it, and reading a page that does is out of scope for this crate.
-    const FLAG_CONTINUED: u8 = 0x01;
 
     /// Builds a page around the lacing values and body given, checksummed the way a writer does.
     ///
@@ -470,15 +478,39 @@ mod tests {
     fn hands_out_the_fragment_a_continued_page_starts_with_as_a_packet() {
         // The other end of that run, which nothing here interprets: a page that states the
         // continued-packet flag parses like any other, and the tail of the packet the page before
-        // it began — the leading four bytes here — is handed out as if it were whole. No accessor
-        // states the flag either, so a caller that has to join the two halves reads the flag byte
-        // itself. A TAF never states it.
+        // it began — the leading four bytes here — is handed out as if it were whole. Joining the
+        // two halves stays the caller's business; the flag itself is all this reports.
         let continued = page(FLAG_CONTINUED, &[4, 3], &[0xa5; 7]);
         let view = PageView::parse(&continued).unwrap();
 
         assert_eq!(packet_lens(&view), [4, 3]);
+        assert!(view.is_continued());
         assert!(!view.is_first());
         assert!(!view.is_last());
+    }
+
+    #[test]
+    fn reads_the_flag_a_page_carries_a_packet_on_from_the_page_before_it_with() {
+        // The flag on its own, and beside the two flags that share the byte with it — a page that
+        // begins or ends a stream is not one that continues a packet.
+        let carries_on = page(FLAG_CONTINUED, &[1], &[0]);
+        let begins = page(FLAG_FIRST, &[1], &[0]);
+        let ends = page(FLAG_LAST, &[1], &[0]);
+        let both = page(FLAG_CONTINUED | FLAG_LAST, &[1], &[0]);
+
+        assert!(PageView::parse(&carries_on).unwrap().is_continued());
+        assert!(!PageView::parse(&begins).unwrap().is_continued());
+        assert!(!PageView::parse(&ends).unwrap().is_continued());
+        assert!(PageView::parse(&both).unwrap().is_continued());
+
+        // And no page of a TAF states it: not the one that opens the stream, and not an aligned
+        // audio page either.
+        assert!(!PageView::parse(&GOLDEN[FIRST_PAGE_AT..])
+            .unwrap()
+            .is_continued());
+        assert!(!PageView::parse(&GOLDEN[ALIGNED_PAGE_AT..])
+            .unwrap()
+            .is_continued());
     }
 
     #[test]
