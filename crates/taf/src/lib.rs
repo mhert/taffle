@@ -12,3 +12,5 @@ pub mod digest;
 pub mod header;
 pub mod id;
 pub mod ogg;
+#[cfg(feature = "alloc")]
+pub mod opus_packet;
