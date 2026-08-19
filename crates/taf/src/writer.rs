@@ -1510,6 +1510,27 @@ mod tests {
     }
 
     #[test]
+    fn counts_what_the_packets_left_for_a_page_occupy_and_lace() {
+        // What a page closing hands the next one: the packets it did not take, which the next page
+        // is filled against. A one-byte packet takes one lacing value, and a 255-byte packet takes
+        // two — 255 says its segment carries on, and the zero behind it ends it — so these two
+        // occupy the page header, three lacing values and 256 bytes of packet between them.
+        let left = vec![
+            Packet {
+                bytes: packet(1),
+                samples: SAMPLES,
+            },
+            Packet {
+                bytes: packet(SEGMENT_LEN),
+                samples: SAMPLES,
+            },
+        ];
+
+        assert_eq!(measure(&left), (HEADER_LEN + 3 + 256, 3));
+        assert_eq!(measure(&[]), (HEADER_LEN, 0));
+    }
+
+    #[test]
     fn sizes_the_packet_that_closes_a_page_the_way_the_format_document_does() {
         // FORMAT.md's worked example: the first audio page has 3557 bytes for its packets and the
         // largest one that fits is 3543. Neither that room nor the 4069 a whole page has is a
