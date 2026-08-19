@@ -256,6 +256,37 @@ fn a_cover_that_cannot_be_written_is_reported_and_the_conversion_still_stands() 
 }
 
 #[test]
+fn a_conversion_named_like_its_own_cover_keeps_the_book_and_leaves_the_picture_out() {
+    let dir = TempDir::new().expect("a directory of its own");
+    // The output the caller named, which is where the cover of a book carrying a PNG would go.
+    let taf_path = dir.path().join("Book.png");
+
+    let (outcome, _) = run(job(vec![fixture(BOOK)], Some(taf_path.clone())));
+
+    let outcome = outcome.expect("the book converts whatever its file is called");
+    assert_eq!(outcome.taf_path, taf_path);
+    assert_eq!(outcome.cover_path, None);
+    let why = outcome
+        .cover_error
+        .expect("the cover says why it is not there");
+    assert!(
+        why.contains(&taf_path.display().to_string()),
+        "the cover failure names no file: {why}"
+    );
+
+    // The book is what is at that name: the picture was never written over it.
+    let (_, chapters, _) = validate(&taf_path);
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(
+        fs::read_dir(dir.path())
+            .expect("the directory reads")
+            .count(),
+        1,
+        "something other than the book is in the directory"
+    );
+}
+
+#[test]
 fn a_conversion_told_to_leave_the_cover_alone_writes_no_cover_at_all() {
     let dir = TempDir::new().expect("a directory of its own");
     let taf_path = dir.path().join("Book.taf");

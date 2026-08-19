@@ -13,11 +13,18 @@ use taf_encode::Cover;
 /// only the two types a name can be given for are written at all: a JPEG becomes `.jpg` and a PNG
 /// becomes `.png`, and anything else would be a file whose name lies about its contents.
 ///
+/// A cover is written *beside* the file and never over it: a conversion whose output is itself
+/// called `Book.png` leaves the picture nowhere to go, and the finished book is worth more than
+/// the picture of it. That is a comparison of the two names, which is what the name of the cover is
+/// derived from; two names for one file — a symlink, a directory reached another way — is a
+/// question about the disk that nothing here asks.
+///
 /// # Errors
 ///
 /// Why no cover was written, in words a frontend can show: the type of a picture nothing here
-/// writes, or the file that could not be written and what stopped it. Neither is a failure of the
-/// conversion — see [`crate::run_convert`].
+/// writes, the place where the picture would be the converted file itself, or the file that could
+/// not be written and what stopped it. None of them is a failure of the conversion — see
+/// [`crate::run_convert`].
 pub(crate) fn write_beside(taf: &Path, cover: &Cover) -> Result<PathBuf, String> {
     let Some(extension) = extension(&cover.mime) else {
         return Err(format!(
@@ -28,6 +35,14 @@ pub(crate) fn write_beside(taf: &Path, cover: &Cover) -> Result<PathBuf, String>
     };
 
     let path = taf.with_extension(extension);
+    if path == taf {
+        return Err(format!(
+            "cover art was left out: {} is the converted file itself, and the picture would be \
+             written over it",
+            path.display()
+        ));
+    }
+
     fs::write(&path, &cover.bytes)
         .map_err(|error| format!("cannot write cover {}: {error}", path.display()))?;
 
@@ -101,6 +116,23 @@ mod tests {
                 .count(),
             0,
             "a cover nothing writes left a file behind"
+        );
+    }
+
+    #[test]
+    fn a_cover_whose_place_is_the_converted_file_itself_is_left_out_and_the_file_stands() {
+        let dir = TempDir::new().expect("a directory of its own");
+        // A conversion whose output was named `.png` — the picture's own place, taken.
+        let taf = dir.path().join("Book Name.png");
+        fs::write(&taf, b"the book itself").expect("the conversion wrote its file");
+
+        let why = write_beside(&taf, &cover("image/png")).expect_err("the book is not overwritten");
+
+        assert!(why.contains("Book Name.png"), "{why}");
+        assert_eq!(
+            fs::read(&taf).expect("the file is still there"),
+            b"the book itself",
+            "the cover was written over the converted file"
         );
     }
 

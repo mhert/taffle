@@ -54,13 +54,18 @@ pub struct ConvertJob {
 pub struct JobOutcome {
     /// The TAF that was written.
     pub taf_path: PathBuf,
-    /// The cover beside it, where one was written.
+    /// The cover beside it, where one was written. Never [`taf_path`](Self::taf_path): the picture
+    /// is written beside the book and never over it.
     pub cover_path: Option<PathBuf>,
     /// Why no cover was written, where one was carried and asked for and did not make it.
     ///
     /// This and [`cover_path`](Self::cover_path) are never both set: a cover was written, or it
     /// says why it was not, or neither — which is a job that asked for no cover, or inputs that
     /// carried none.
+    ///
+    /// An output the caller named `Book.png`, converted from a book carrying a PNG, is one of the
+    /// ways a cover comes to nothing: the picture's place is the converted file itself, so it is
+    /// left out and says so, and the book that was just written stands.
     pub cover_error: Option<String>,
     /// What the conversion itself came to.
     pub report: ConversionReport,
