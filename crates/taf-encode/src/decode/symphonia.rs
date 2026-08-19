@@ -1,12 +1,21 @@
 //! [`AudioSource`] over symphonia: WAV, FLAC, MP3, AAC in MP4/M4B, and Vorbis in Ogg — every input
-//! format the converter takes apart from Opus itself.
+//! format the converter takes apart from Opus itself, which is decoded a module over.
 //!
 //! # The format is decided by the bytes
 //!
-//! [`open_source`] hands the probe an empty [`Hint`]. A caller may have no file name to offer at
-//! all — a stream, a buffer, an upload — and an extension that lies is worse than one that is
-//! missing, so what the input starts with is what decides. That also means garbage is recognized
-//! as garbage before anything tries to decode it.
+//! [`open`] hands the probe an empty [`Hint`]. A caller may have no file name to offer at all — a
+//! stream, a buffer, an upload — and an extension that lies is worse than one that is missing, so
+//! what the input starts with is what decides. That also means garbage is recognized as garbage
+//! before anything tries to decode it.
+//!
+//! # What this build reads, and what it happens to
+//!
+//! The formats above are what the crate's manifest asks symphonia for by name, and what the tests
+//! pin. symphonia's own defaults are on as well, so the probe also accepts the MKV and `WebM`
+//! containers they bring — untested here, and neither refused nor promised. What the manifest does
+//! *not* leave to a default is a decoder the tests depend on: the PCM and ADPCM ones a WAV needs
+//! are asked for by name, so a file that decodes today does not stop decoding because a dependency
+//! changed what it considers standard.
 //!
 //! # Which errors are which
 //!
@@ -20,13 +29,13 @@
 //! # What an encoder added is not what an author recorded
 //!
 //! Both lossy codecs here start a stream with frames the encoder needed to get going and end it
-//! with frames it needed to fill the last block, and both write down how many. [`open_source`]
-//! asks for those to be trimmed ([`FormatOptions::enable_gapless`]), because an audiobook is
-//! converted from files an author's chapters were cut into, and silence the encoder added at every
-//! cut would end up in the middle of the book. The fixtures pin what that means today: an MP3 of
-//! ten authored seconds decodes to exactly ten seconds' worth of frames, while symphonia's MP4
-//! demuxer does not implement the option and hands out the AAC priming frames whatever it is set
-//! to — under 25 ms of them, which is also the margin a chapter mark in an m4b can land within.
+//! with frames it needed to fill the last block, and both write down how many. [`open`] asks for
+//! those to be trimmed ([`FormatOptions::enable_gapless`]), because an audiobook is converted from
+//! files an author's chapters were cut into, and silence the encoder added at every cut would end
+//! up in the middle of the book. The fixtures pin what that means today: an MP3 of ten authored
+//! seconds decodes to exactly ten seconds' worth of frames, while symphonia's MP4 demuxer does not
+//! implement the option and hands out the AAC priming frames whatever it is set to — under 25 ms
+//! of them, which is also the margin a chapter mark in an m4b can land within.
 //!
 //! # The shape of a stream, and who knows it
 //!
@@ -65,7 +74,7 @@ use super::{AudioSource, Cover, DecodeError, SourceChapter, SourceMetadata, Sour
 /// of it has been decoded. [`DecodeError::NoAudioTrack`] when it is a container but states no
 /// track of decodable audio. [`DecodeError::Io`] when the input itself cannot be read, which
 /// includes an input that says it can be rewound and then cannot.
-pub fn open_source(mut reader: Box<dyn MediaSource>) -> Result<Box<dyn AudioSource>, DecodeError> {
+pub(super) fn open(mut reader: Box<dyn MediaSource>) -> Result<Box<dyn AudioSource>, DecodeError> {
     // The chapter marks are read off the raw input, before a demuxer that does not read them owns
     // it. What comes back is in the container's own units, and stays that way until the rate the
     // stream is decoded at is settled below.
@@ -286,7 +295,7 @@ fn stream_error(err: Error) -> Option<DecodeError> {
     match err {
         Error::IoError(err) if err.kind() == ErrorKind::UnexpectedEof => None,
         Error::IoError(err) => Some(DecodeError::Io(err)),
-        err => Some(DecodeError::Decode(err)),
+        err => Some(DecodeError::Decode(Box::new(err))),
     }
 }
 

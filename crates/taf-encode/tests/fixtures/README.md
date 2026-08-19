@@ -1,8 +1,8 @@
 # taf-encode test fixtures
 
 Encoded inputs for the decode tests. Everything here was generated on **2026-08-19** with
-**ffmpeg n9.0.1** (Arch Linux build, `--enable-libmp3lame`), from nothing but ffmpeg's own
-`lavfi` sources — no third-party audio, no personal files.
+**ffmpeg n9.0.1** (Arch Linux build, `--enable-libmp3lame --enable-libopus --enable-libvorbis`),
+from nothing but ffmpeg's own `lavfi` sources — no third-party audio, no personal files.
 
 | File | Size | SHA-256 | Contents |
 | --- | --- | --- | --- |
@@ -12,6 +12,9 @@ Encoded inputs for the decode tests. Everything here was generated on **2026-08-
 | `video-first.mp4` | 5 952 B | `ef4e160bcc3cc01a2e6477d3148f22476292995a8b324cc4cb0f956ae5b9b9e2` | Video track, then 1 s of mono AAC |
 | `no-audio.mp4` | 1 024 B | `a192e82fbb172343ad6bd8340a458fc38fbc5bba6fe95c9c757010c01ffdf764` | One video track and nothing else |
 | `mp3-in-mp4.mp4` | 5 066 B | `a86ecb2c2ded5c64390133cc6cc1810c0dec45a600bd80a3cc9db0e6c7beae03` | 1 s of MPEG audio in an MP4 |
+| `tiny.opus` | 27 560 B | `e4fa0c13adfcb02713df751bcab67037ed9203b703928bac0ed598d79f7e6e04` | 2 s of stereo Opus in Ogg |
+| `mono.opus` | 9 504 B | `5ca5415ca84c4d6bc3add671ec4656093694f5f0f1bd7755f8b3eb40735bd33e` | 1 s of Opus in Ogg with a single channel |
+| `vorbis.ogg` | 6 772 B | `f571bc0c7c308a6ab824b5b88522fb26d63b768416818b9c2b966280be2558bd` | 1 s of stereo Vorbis in Ogg — an Ogg file that is not Opus |
 
 The constants the tests assert against are in `crates/taf-encode/tests/fixtures.rs`; what each file
 is *for* is in the doc comment there.
@@ -28,10 +31,17 @@ The rate is deliberately not the 48 kHz a TAF ends up at, and it is not the rate
 fixture's *duration* either, so nothing downstream can assume an input already arrives at the
 output rate.
 
+The three Ogg files carry the same 440 Hz sine and no `volume` filter, so they stand at the
+amplitude ffmpeg's `sine` source has of itself: 1/8 of full scale. `-ac 2` upmixes that one channel
+with the centre-to-front coefficient of 1/√2, which puts the stereo ones at 1/8 × 1/√2 = 0.177 full
+scale — a **peak of 2 896** — and leaves the mono one at **4 095**. Opus is decoded at 48 kHz
+whatever it was encoded from, so `tiny.opus` and `mono.opus` are the fixtures whose *decoded* rate
+is not the rate they were authored at.
+
 ## Regeneration
 
 Run from any scratch directory. `$FIXTURES` is this directory. Re-running every command below on
-the same ffmpeg build reproduces all six files byte for byte — that was checked against the
+the same ffmpeg build reproduces all nine files byte for byte — that was checked against the
 SHA-256 sums above, and `-fflags +bitexact` is what makes it hold.
 
 ### `chapters.txt` — the chapter marks `tiny.m4b` is authored with
@@ -117,6 +127,31 @@ ffmpeg -hide_banner -y -loglevel error \
   -fflags +bitexact -f mp4 "$FIXTURES/mp3-in-mp4.mp4"
 ```
 
+### `tiny.opus`, `mono.opus` and `vorbis.ogg`
+
+The Ogg fixtures. The first two are what the Opus backend reads; the third is what proves an Ogg
+file of another codec still goes to symphonia.
+
+```bash
+ffmpeg -hide_banner -y -loglevel error \
+  -f lavfi -i "sine=frequency=440:duration=2" \
+  -ac 2 -c:a libopus \
+  -fflags +bitexact "$FIXTURES/tiny.opus"
+
+ffmpeg -hide_banner -y -loglevel error \
+  -f lavfi -i "sine=frequency=440:duration=1" \
+  -ac 1 -c:a libopus \
+  -fflags +bitexact "$FIXTURES/mono.opus"
+
+ffmpeg -hide_banner -y -loglevel error \
+  -f lavfi -i "sine=frequency=440:duration=1" \
+  -ac 2 -c:a libvorbis \
+  -fflags +bitexact "$FIXTURES/vorbis.ogg"
+```
+
+`-fflags +bitexact` matters twice over here: it keeps ffmpeg's version out of the file *and* out
+of the `OpusTags` vendor string, which would otherwise name the libopus build that encoded it.
+
 ### The authored peak
 
 How `ENCODED_PEAK` was measured, straight off the tone before any encoder saw it:
@@ -178,3 +213,31 @@ Checked against the generated files at the time they were committed.
   channel count — and symphonia's MPEG decoder, unlike its AAC one, does not work one out from the
   codec's configuration either. Nothing states the shape of this stream until a frame of it has
   been decoded, which is the case `open_source` refuses.
+
+### `tiny.opus`
+
+- Five pages: `OpusHead`, `OpusTags`, and three of audio. The head states version 1, 2 channels, a
+  pre-skip of 312 samples, an input rate of 48 000 and channel mapping family 0.
+- 101 audio packets of 20 ms = 96 960 samples decoded, against a last granule position of 96 312.
+  Take the pre-skip off the front and the padding behind the granule off the back and exactly the
+  96 000 frames of the authored 2 seconds are left — which is what `OPUS_FRAMES` states and what
+  ffmpeg's own decoder hands out for the same file.
+- Decoded peak 2 923, which is 0.9 % above the authored 2 896.
+- The `OpusTags` vendor string is `ffmpeg` and the one comment is `encoder=Lavc libopus`: no
+  version anywhere, which is `-fflags +bitexact` doing its work.
+
+### `mono.opus`
+
+- Four pages, the head stating 1 channel and the same pre-skip of 312. 51 audio packets = 48 960
+  samples decoded against a last granule position of 48 312, so 48 000 frames of tone.
+- Decoded through a *stereo* decoder, which is what the Opus backend always asks libopus for: the
+  one channel comes out on both sides, sample for sample, at a peak of 4 193 — 2.4 % above the
+  authored 4 095, and nowhere near the half of it a decoder that spread one channel over two
+  would produce.
+
+### `vorbis.ogg`
+
+- An Ogg file whose first page carries `\x01vorbis` where an Opus stream carries `OpusHead`, so
+  the sniff in front of the probe passes it on and symphonia demuxes and decodes it.
+- 44 100 Hz stereo, one second, decoded peak 2 986. symphonia hands out 44 608 frames: it does not
+  trim the last block, so the count runs under a Vorbis block past the authored 44 100.

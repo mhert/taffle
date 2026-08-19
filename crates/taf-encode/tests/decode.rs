@@ -10,9 +10,11 @@
 
 mod fixtures;
 
+use std::fs;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::path::PathBuf;
 
-use symphonia::core::io::MediaSource;
+use symphonia::core::io::{MediaSource, ReadOnlySource};
 use taf_encode::{open_source, AudioSource, DecodeError, SourceSpec};
 
 /// The WAV fixture, opened.
@@ -57,19 +59,48 @@ fn peak_in(blocks: &[Vec<i16>]) -> i32 {
         .unwrap()
 }
 
-/// A lossy codec is allowed to miss the tone's peak, and both fixtures were measured missing it by
+/// A lossy codec is allowed to miss the tone's peak, and every fixture was measured missing it by
 /// a few percent. What none of them may do is miss it by the factor a sample conversion that
 /// scales twice, or not at all, would: a seventh either way is wide enough for the codecs and far
 /// too narrow for that.
-fn assert_peak_near_the_authored_one(blocks: &[Vec<i16>]) {
-    let peak = peak_in(blocks);
-    let authored = fixtures::ENCODED_PEAK;
+fn assert_peak_near(peak: i32, authored: i32) {
     let slack = authored / 7;
 
     assert!(
         (authored - slack..=authored + slack).contains(&peak),
         "the tone peaks at {peak}, not within a seventh of the authored {authored}"
     );
+}
+
+/// The failure a source runs into before it runs out of blocks.
+///
+/// The walk is bounded the same way [`blocks_of`] is, and both ways of not failing — a clean end
+/// and no end at all — are what this is asserting against.
+fn failure_of(source: &mut dyn AudioSource) -> DecodeError {
+    for _ in 0..fixtures::SAMPLES {
+        match source.next_block() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the broken input ended as if it were whole"),
+            Err(err) => return err,
+        }
+    }
+    panic!("the broken input kept handing out blocks");
+}
+
+/// An Ogg-Opus file of the packets handed in, one page each.
+fn opus_file(head: &[u8], tags: Option<&[u8]>, audio: &[&[u8]]) -> Vec<u8> {
+    fixtures::opus_pages(1, head, tags, audio).concat()
+}
+
+/// `bytes` written to a file of `name` in the temporary directory, and where it went.
+///
+/// The name carries the process the test runs in, so that two runs at once do not write over each
+/// other's inputs.
+fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("taf-encode-{}-{name}", std::process::id()));
+    fs::write(&path, bytes).expect("the temporary directory takes a file");
+
+    path
 }
 
 /// The loudest sample of one channel of an interleaved block.
@@ -219,7 +250,7 @@ fn an_m4b_decodes_the_tone_it_was_authored_with() {
         "decoded {frames} frames, not the authored {} and its priming",
         fixtures::ENCODED_FRAMES
     );
-    assert_peak_near_the_authored_one(&blocks);
+    assert_peak_near(peak_in(&blocks), fixtures::ENCODED_PEAK);
 }
 
 #[test]
@@ -241,7 +272,7 @@ fn an_mp3_decodes_the_tone_without_the_padding_its_encoder_added() {
         frames_in(&blocks, fixtures::CHANNELS),
         fixtures::ENCODED_FRAMES
     );
-    assert_peak_near_the_authored_one(&blocks);
+    assert_peak_near(peak_in(&blocks), fixtures::ENCODED_PEAK);
 }
 
 #[test]
@@ -255,6 +286,443 @@ fn an_mp3_carries_its_cover_through_byte_for_byte() {
     assert_eq!(cover.bytes, fixtures::COVER_PNG);
     // Chapter marks live in the MP4 atom this crate reads; an MP3 states none it can find.
     assert!(metadata.chapters.is_empty());
+}
+
+#[test]
+fn an_opus_stream_is_decoded_at_the_48_khz_opus_is_defined_at() {
+    let source = source_of(fixtures::TINY_OPUS);
+
+    assert_eq!(
+        source.spec(),
+        SourceSpec {
+            sample_rate: fixtures::OPUS_RATE,
+            channels: fixtures::CHANNELS,
+        }
+    );
+}
+
+#[test]
+fn an_opus_stream_decodes_the_tone_without_the_samples_its_encoder_added() {
+    let mut source = source_of(fixtures::TINY_OPUS);
+
+    let blocks = blocks_of(source.as_mut());
+
+    // The fixture states a pre-skip of 312 samples and a last granule position of 96 312, so the
+    // 96 000 frames it was authored with are exactly what is left when both ends are trimmed to
+    // what the stream says about itself.
+    assert_eq!(
+        frames_in(&blocks, fixtures::CHANNELS),
+        fixtures::OPUS_FRAMES
+    );
+    assert_peak_near(peak_in(&blocks), fixtures::OPUS_PEAK);
+}
+
+#[test]
+fn an_opus_stream_states_no_chapters_and_no_cover() {
+    let mut source = source_of(fixtures::TINY_OPUS);
+
+    let metadata = source.metadata();
+
+    assert!(metadata.chapters.is_empty());
+    assert!(metadata.cover.is_none());
+}
+
+#[test]
+fn the_bytes_decide_which_backend_reads_an_input_and_not_the_name_it_came_under() {
+    // `open_source` is handed a reader and never a name, so the only name an input can arrive
+    // under is the one on the file it was opened from. This one says MPEG audio and holds Opus.
+    let lying = temp_file("says-mp3-holds-opus.mp3", fixtures::TINY_OPUS);
+    let mut source = open_source(Box::new(fs::File::open(&lying).unwrap())).unwrap();
+
+    let blocks = blocks_of(source.as_mut());
+
+    assert_eq!(
+        source.spec(),
+        SourceSpec {
+            sample_rate: fixtures::OPUS_RATE,
+            channels: fixtures::CHANNELS,
+        }
+    );
+    assert_eq!(
+        frames_in(&blocks, fixtures::CHANNELS),
+        fixtures::OPUS_FRAMES
+    );
+    fs::remove_file(&lying).unwrap();
+}
+
+#[test]
+fn a_mono_opus_stream_arrives_as_the_stereo_every_opus_source_hands_out() {
+    let mut source = source_of(fixtures::MONO_OPUS);
+
+    let blocks = blocks_of(source.as_mut());
+
+    assert_eq!(
+        source.spec(),
+        SourceSpec {
+            sample_rate: fixtures::OPUS_RATE,
+            channels: fixtures::CHANNELS,
+        }
+    );
+    assert_eq!(
+        frames_in(&blocks, fixtures::CHANNELS),
+        fixtures::MONO_OPUS_FRAMES
+    );
+    // libopus hands a stereo decoder the one channel a mono stream carries, on both sides — so
+    // the tone comes out at the peak it was authored with rather than at half of it, and the two
+    // sides are the same sample for sample.
+    let left = blocks.iter().map(|block| peak_of(block, 0)).max().unwrap();
+    let right = blocks.iter().map(|block| peak_of(block, 1)).max().unwrap();
+    assert_eq!(
+        left, right,
+        "one channel came out of the two sides differently"
+    );
+    assert_peak_near(left, fixtures::MONO_OPUS_PEAK);
+}
+
+#[test]
+fn an_ogg_stream_that_is_not_opus_is_read_by_the_demuxer_behind_the_sniff() {
+    let mut source = source_of(fixtures::VORBIS_OGG);
+
+    let blocks = blocks_of(source.as_mut());
+
+    // Vorbis in Ogg is symphonia's to demux and decode, and it states the rate the file was
+    // authored at — not the 48 kHz every Opus stream is decoded at.
+    assert_eq!(
+        source.spec(),
+        SourceSpec {
+            sample_rate: fixtures::SAMPLE_RATE,
+            channels: fixtures::CHANNELS,
+        }
+    );
+    // Vorbis decodes in blocks of up to 2048 frames and symphonia hands out the last one whole,
+    // so the second the file was authored with comes back with under a block on top of it.
+    let frames = frames_in(&blocks, fixtures::CHANNELS);
+    assert!(
+        (fixtures::VORBIS_FRAMES..fixtures::VORBIS_FRAMES + 2048).contains(&frames),
+        "decoded {frames} frames, not the authored {} and its last block",
+        fixtures::VORBIS_FRAMES
+    );
+}
+
+#[test]
+fn an_opus_stream_whose_channels_take_more_than_one_decoder_is_not_a_format_this_reads() {
+    // Channel mapping family 1 is surround: several Opus streams in one, which takes a decoder
+    // per stream and the mapping table behind the head to place them.
+    let mut head = taf::ogg::opus_head(fixtures::OPUS_PRE_SKIP);
+    head[18] = 1;
+
+    let opened = open_source(Box::new(Cursor::new(opus_file(
+        &head,
+        Some(&fixtures::opus_tags()),
+        &[&fixtures::opus_frame()],
+    ))));
+
+    assert!(
+        matches!(opened, Err(DecodeError::UnsupportedFormat)),
+        "a surround stream opened as {:?}",
+        opened.map(|_| "a source")
+    );
+}
+
+#[test]
+fn an_opus_stream_that_does_not_state_its_comment_header_never_was_one() {
+    // RFC 7845 puts the comment header in the second packet of the stream and nowhere else, so a
+    // stream that ends in front of it, one that breaks off inside it, and one that states
+    // something else there are all the same kind of broken: not the format the first packet
+    // claimed, rather than a file that could not be read.
+    let head = taf::ogg::opus_head(fixtures::OPUS_PRE_SKIP);
+    let whole = opus_file(&head, Some(&fixtures::opus_tags()), &[]);
+
+    let ended = open_source(Box::new(Cursor::new(opus_file(&head, None, &[]))));
+    let broken = open_source(Box::new(Cursor::new(
+        whole.get(..whole.len() - 200).map(<[u8]>::to_vec).unwrap(),
+    )));
+    let other = open_source(Box::new(Cursor::new(opus_file(
+        &head,
+        Some(b"not the comment header"),
+        &[&fixtures::opus_frame()],
+    ))));
+
+    assert!(
+        matches!(ended, Err(DecodeError::UnsupportedFormat)),
+        "a stream of nothing but a head opened as {:?}",
+        ended.map(|_| "a source")
+    );
+    assert!(
+        matches!(broken, Err(DecodeError::UnsupportedFormat)),
+        "a stream breaking off inside its comment header opened as {:?}",
+        broken.map(|_| "a source")
+    );
+    assert!(
+        matches!(other, Err(DecodeError::UnsupportedFormat)),
+        "a stream of no comment header opened as {:?}",
+        other.map(|_| "a source")
+    );
+}
+
+#[test]
+fn a_head_behind_the_longest_lacing_table_a_page_can_state_is_still_found() {
+    /// How many lacing values a page states at most, which is what one byte counts to.
+    const VALUES: usize = 255;
+    /// What the two headers take of them: one for the head, two for the comment header, whose
+    /// 436 bytes need a value for their first full 255-byte segment and one to end them.
+    const HEADERS: usize = 3;
+    /// Where the first packet of such a page begins: the page's header and its whole table.
+    const MAGIC_AT: usize = 27 + VALUES;
+
+    let head = taf::ogg::opus_head(fixtures::OPUS_PRE_SKIP);
+    let tags = fixtures::opus_tags();
+    // Packets of no bytes, one lacing value each, padding the table out to everything a page can
+    // state — which is the furthest into a page the magic the sniff looks for can be pushed.
+    let mut packets: Vec<&[u8]> = vec![&head, &tags];
+    packets.resize(packets.len() + VALUES - HEADERS, &[]);
+    let page = fixtures::ogg_page_of(1, 0, 0, false, &packets);
+    assert_eq!(page.get(MAGIC_AT..MAGIC_AT + 8), Some(&b"OpusHead"[..]));
+
+    let source = open_source(Box::new(Cursor::new(page))).expect("the stream opens");
+
+    assert_eq!(
+        source.spec(),
+        SourceSpec {
+            sample_rate: fixtures::OPUS_RATE,
+            channels: fixtures::CHANNELS,
+        }
+    );
+}
+
+#[test]
+fn opus_audio_that_does_not_decode_is_not_a_clean_end() {
+    // A packet that says a frame count follows it and then ends: nothing libopus can take apart.
+    let file = opus_file(
+        &taf::ogg::opus_head(fixtures::OPUS_PRE_SKIP),
+        Some(&fixtures::opus_tags()),
+        &[&[0xff]],
+    );
+    let mut source = open_source(Box::new(Cursor::new(file))).expect("the stream opens");
+
+    let failure = failure_of(source.as_mut());
+
+    assert!(
+        matches!(failure, DecodeError::Decode(_)),
+        "reported as {failure:?}"
+    );
+}
+
+#[test]
+fn an_opus_packet_of_no_bytes_at_all_is_broken_data_and_not_a_lost_packet() {
+    // libopus reads a packet of no bytes as one that went missing and invents audio to cover the
+    // gap. A file that states one is broken rather than lossy, and gets told so.
+    let file = opus_file(
+        &taf::ogg::opus_head(fixtures::OPUS_PRE_SKIP),
+        Some(&fixtures::opus_tags()),
+        &[&[]],
+    );
+    let mut source = open_source(Box::new(Cursor::new(file))).expect("the stream opens");
+
+    let failure = failure_of(source.as_mut());
+
+    assert!(
+        matches!(failure, DecodeError::Decode(_)),
+        "reported as {failure:?}"
+    );
+}
+
+#[test]
+fn a_page_whose_checksum_does_not_cover_what_it_carries_is_not_decoded() {
+    // A byte in the middle of the first audio page's body, which the page's checksum states a
+    // sum over: what a file that rotted on disk looks like from here.
+    let mut corrupt = fixtures::TINY_OPUS.to_vec();
+    corrupt[5_000] ^= 0xff;
+    let mut source = open_source(Box::new(Cursor::new(corrupt))).expect("the stream opens");
+
+    let failure = failure_of(source.as_mut());
+
+    assert!(
+        matches!(failure, DecodeError::Decode(_)),
+        "reported as {failure:?}"
+    );
+}
+
+#[test]
+fn an_opus_stream_that_breaks_off_mid_page_is_not_a_clean_end() {
+    let truncated = fixtures::TINY_OPUS
+        .get(..fixtures::TINY_OPUS.len() - 512)
+        .map(<[u8]>::to_vec)
+        .unwrap();
+    let mut source = open_source(Box::new(Cursor::new(truncated))).expect("the stream opens");
+
+    let failure = failure_of(source.as_mut());
+
+    assert!(
+        matches!(failure, DecodeError::Io(_)),
+        "reported as {failure:?}"
+    );
+}
+
+#[test]
+fn the_packets_of_another_stream_in_the_same_file_are_not_decoded_as_opus() {
+    let frame = fixtures::opus_frame();
+    let mut pages = fixtures::opus_pages(
+        1,
+        &taf::ogg::opus_head(fixtures::OPUS_PRE_SKIP),
+        Some(&fixtures::opus_tags()),
+        &[&frame, &frame],
+    );
+    // An Ogg file may carry several logical streams at once: the pages opening them all stand in
+    // front of the audio, and from there the streams take turns. This one is not Opus, and no
+    // Opus decoder could make anything of either of its packets.
+    pages.insert(1, fixtures::ogg_page(2, 0, 0, false, b"something else"));
+    pages.insert(4, fixtures::ogg_page(2, 1, 0, false, b"and more of it"));
+    let mut source =
+        open_source(Box::new(Cursor::new(pages.concat()))).expect("the opus stream opens");
+
+    let blocks = blocks_of(source.as_mut());
+
+    // Two frames of audio, and the pre-skip the head states trimmed off the front of them.
+    assert_eq!(
+        frames_in(&blocks, fixtures::CHANNELS),
+        2 * fixtures::OPUS_FRAME - u64::from(fixtures::OPUS_PRE_SKIP)
+    );
+}
+
+#[test]
+fn only_the_page_a_stream_ends_on_says_where_its_audio_stops() {
+    // RFC 7845 gives the last page's granule position the meaning "the audio stops here", and
+    // every page in front of it states a timestamp — one a stream is free to carry an offset in.
+    // A timestamp that lags what its packets decoded to is not a stream stating less audio.
+    let frame = fixtures::opus_frame();
+    let plays_to = u64::from(fixtures::OPUS_PRE_SKIP) + 2 * fixtures::OPUS_FRAME;
+    let file = [
+        fixtures::ogg_page(
+            1,
+            0,
+            0,
+            false,
+            &taf::ogg::opus_head(fixtures::OPUS_PRE_SKIP),
+        ),
+        fixtures::ogg_page(1, 1, 0, false, &fixtures::opus_tags()),
+        fixtures::ogg_page(1, 2, 100, false, &frame),
+        fixtures::ogg_page(1, 3, plays_to, true, &frame),
+    ]
+    .concat();
+    let mut source = open_source(Box::new(Cursor::new(file))).expect("the stream opens");
+
+    let blocks = blocks_of(source.as_mut());
+
+    assert_eq!(
+        frames_in(&blocks, fixtures::CHANNELS),
+        2 * fixtures::OPUS_FRAME - u64::from(fixtures::OPUS_PRE_SKIP)
+    );
+}
+
+#[test]
+fn a_pre_skip_longer_than_a_packet_takes_whole_packets_with_it() {
+    // libopus asks for 312 samples; the format allows any number, and an encoder asking for more
+    // than one packet holds leaves that packet none of the recording.
+    const PRE_SKIP: u16 = 2_000;
+
+    let frame = fixtures::opus_frame();
+    let plays_to = u64::from(PRE_SKIP) + 3 * fixtures::OPUS_FRAME;
+    let file = [
+        fixtures::ogg_page(1, 0, 0, false, &taf::ogg::opus_head(PRE_SKIP)),
+        fixtures::ogg_page(1, 1, 0, false, &fixtures::opus_tags()),
+        fixtures::ogg_page(
+            1,
+            2,
+            u64::from(PRE_SKIP) + fixtures::OPUS_FRAME,
+            false,
+            &frame,
+        ),
+        fixtures::ogg_page(
+            1,
+            3,
+            u64::from(PRE_SKIP) + 2 * fixtures::OPUS_FRAME,
+            false,
+            &frame,
+        ),
+        fixtures::ogg_page(1, 4, plays_to, true, &frame),
+    ]
+    .concat();
+    let mut source = open_source(Box::new(Cursor::new(file))).expect("the stream opens");
+
+    let blocks = blocks_of(source.as_mut());
+
+    assert_eq!(
+        frames_in(&blocks, fixtures::CHANNELS),
+        3 * fixtures::OPUS_FRAME - u64::from(PRE_SKIP)
+    );
+}
+
+#[test]
+fn an_opus_stream_whose_header_pages_do_not_hold_together_never_was_one() {
+    // A byte behind the magic of the head, and one inside the comment header behind it: both sit
+    // in a page whose checksum states a sum over them, and both leave a file that is sniffed as
+    // Opus and then found not to hold a stream.
+    for byte in [40, 100] {
+        let mut corrupt = fixtures::TINY_OPUS.to_vec();
+        corrupt[byte] ^= 0xff;
+
+        let opened = open_source(Box::new(Cursor::new(corrupt)));
+
+        assert!(
+            matches!(opened, Err(DecodeError::UnsupportedFormat)),
+            "a stream broken at byte {byte} opened as {:?}",
+            opened.map(|_| "a source")
+        );
+    }
+}
+
+#[test]
+fn an_input_that_breaks_off_while_it_is_being_sniffed_is_no_opus_stream() {
+    // The sniff reads before anything else does, and 20 bytes is not enough of a page to reach
+    // the magic that decides. An input that breaks off inside them states no Opus and is handed
+    // on unread, so what comes back is the read failure the backend behind the sniff runs into —
+    // not a broken Opus stream.
+    let opened = open_source(Box::new(FailingSource::seekable(
+        fixtures::TINY_OPUS.to_vec(),
+        20,
+    )));
+
+    assert!(
+        matches!(opened, Err(DecodeError::Io(_))),
+        "an input that broke off mid-sniff opened as {:?}",
+        opened.map(|_| "a source")
+    );
+}
+
+#[test]
+fn an_input_that_stops_being_readable_in_front_of_the_audio_reports_the_read_failure() {
+    // Enough of the stream to sniff it as Opus and to read its head, and not enough to finish the
+    // comment header behind it — which is a page or more of its own in any file carrying a cover.
+    let file = opus_file(
+        &taf::ogg::opus_head(fixtures::OPUS_PRE_SKIP),
+        Some(&fixtures::opus_tags()),
+        &[],
+    );
+
+    let opened = open_source(Box::new(FailingSource::seekable(file, 400)));
+
+    assert!(
+        matches!(opened, Err(DecodeError::Io(_))),
+        "an input that broke off opened as {:?}",
+        opened.map(|_| "a source")
+    );
+}
+
+#[test]
+fn an_opus_stream_that_cannot_be_seeked_is_not_one_this_reads() {
+    // The sniff rewinds the input, and the reader an Opus stream is taken apart with seeks in it
+    // as well, so a stream that arrives through something unseekable never reaches either. What
+    // does reach it is symphonia, which demuxes the Ogg and finds no track it has a decoder for.
+    let opened = open_source(Box::new(ReadOnlySource::new(Cursor::new(
+        fixtures::TINY_OPUS,
+    ))));
+
+    assert!(
+        matches!(opened, Err(DecodeError::NoAudioTrack)),
+        "an unseekable Opus stream opened as {:?}",
+        opened.map(|_| "a source")
+    );
 }
 
 #[test]
@@ -460,18 +928,7 @@ fn an_input_that_stops_being_readable_mid_stream_is_not_a_clean_end() {
     let mut source =
         open_source(Box::new(FailingSource::new(fixtures::sine_wav(), 512))).expect("a WAV opens");
 
-    let mut failure = None;
-    for _ in 0..fixtures::SAMPLES {
-        match source.next_block() {
-            Ok(Some(_)) => {}
-            Ok(None) => panic!("the truncated input ended as if it were whole"),
-            Err(err) => {
-                failure = Some(err);
-                break;
-            }
-        }
-    }
-    let failure = failure.expect("the truncated input kept handing out blocks");
+    let failure = failure_of(source.as_mut());
 
     assert!(
         matches!(failure, DecodeError::Io(_)),
@@ -513,6 +970,7 @@ impl MediaSource for SeeklessSource {
 struct FailingSource {
     bytes: Cursor<Vec<u8>>,
     readable: u64,
+    seekable: bool,
 }
 
 impl FailingSource {
@@ -520,6 +978,16 @@ impl FailingSource {
         Self {
             bytes: Cursor::new(bytes),
             readable,
+            seekable: false,
+        }
+    }
+
+    /// The same input, saying it can be seeked — which is what the Opus route asks of one before
+    /// it reads anything at all.
+    fn seekable(bytes: Vec<u8>, readable: u64) -> Self {
+        Self {
+            seekable: true,
+            ..Self::new(bytes, readable)
         }
     }
 }
@@ -546,7 +1014,7 @@ impl Seek for FailingSource {
 
 impl MediaSource for FailingSource {
     fn is_seekable(&self) -> bool {
-        false
+        self.seekable
     }
 
     fn byte_len(&self) -> Option<u64> {

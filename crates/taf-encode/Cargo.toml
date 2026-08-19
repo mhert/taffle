@@ -7,12 +7,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ogg = "0.9"
+opus = "0.3"
 sha1 = { workspace = true }
 symphonia = { version = "0.5", features = [
     "mp3",
     "aac",
     "isomp4",
     "wav",
+    "pcm",
+    "adpcm",
     "flac",
     "ogg",
     "vorbis",

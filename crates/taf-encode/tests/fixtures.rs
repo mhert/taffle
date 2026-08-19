@@ -1,5 +1,5 @@
-//! The audio the decode tests run on: the WAV files built here byte by byte, and the encoded ones
-//! committed next door.
+//! The audio the decode tests run on: the WAV files built here byte by byte, the Ogg streams built
+//! here page by page, and the encoded ones committed next door.
 //!
 //! # The files on disk
 //!
@@ -9,10 +9,12 @@
 //! the exact commands, the properties they were checked for, and everything the constants below
 //! state about them.
 //!
-//! They all carry the same tone: 10 seconds of a 440 Hz sine at 44 100 Hz, stereo, peaking at
-//! [`ENCODED_PEAK`]. That peak is what a lossy codec has to bring back within a few percent, and
-//! it is far enough from both silence and full scale that a sample conversion which scales by the
-//! wrong power of two lands outside it.
+//! The MPEG and AAC ones carry the same tone: 10 seconds of a 440 Hz sine at 44 100 Hz, stereo,
+//! peaking at [`ENCODED_PEAK`]. That peak is what a lossy codec has to bring back within a few
+//! percent, and it is far enough from both silence and full scale that a sample conversion which
+//! scales by the wrong power of two lands outside it. The Ogg ones carry the same sine at their
+//! own lengths and peaks — [`OPUS_PEAK`], [`MONO_OPUS_PEAK`] — since Opus is always decoded at
+//! 48 kHz and a mono stream is not upmixed before it is encoded.
 //!
 //! # The WAV files built here
 //!
@@ -30,6 +32,14 @@
 //!
 //! [`broken_adpcm_wav`] is the same idea turned around: a file that opens and then does not
 //! decode.
+//!
+//! # The Ogg streams built here
+//!
+//! An Ogg page states a checksum over itself, so a stream cannot be cut out of a committed file
+//! with an edit — which is what [`opus_pages`] is for: it lays packets out in pages with `taf`'s
+//! own page builder, checksums and all, and every stream an error path needs is a different set of
+//! packets handed to it. The audio packets are encoded by libopus itself ([`opus_frame`]), because
+//! a stream that is only interesting once it is being decoded has to get that far first.
 
 // Every cast below is on a compile-time constant that fits its target, or on a sine bounded by the
 // peak it was scaled with.
@@ -40,6 +50,9 @@
 )]
 
 use std::f64::consts::TAU;
+
+use opus::{Application, Channels, Encoder};
+use taf::ogg::PageBuilder;
 
 /// The fixture's sample rate, in Hz.
 pub const SAMPLE_RATE: u32 = 44_100;
@@ -99,6 +112,45 @@ pub const ENCODED_PEAK: i32 = 11_582;
 /// Frames in one AAC packet, which is what a chapter mark in [`TINY_M4B`] can be off by: the
 /// encoder's priming frames come out of the decoder as audio, and no timestamp accounts for them.
 pub const AAC_FRAME: u64 = 1024;
+
+/// The tone in Ogg-Opus: 2 seconds of stereo, which is 96 000 frames at [`OPUS_RATE`].
+pub const TINY_OPUS: &[u8] = include_bytes!("fixtures/tiny.opus");
+
+/// The same tone in Ogg-Opus with a single channel, and a second of it: what a stream that was
+/// never stereo comes out of a stereo decoder as.
+pub const MONO_OPUS: &[u8] = include_bytes!("fixtures/mono.opus");
+
+/// An Ogg file that is not Opus: a second of Vorbis at [`SAMPLE_RATE`], which is the demuxer
+/// behind `open_source`'s to read.
+pub const VORBIS_OGG: &[u8] = include_bytes!("fixtures/vorbis.ogg");
+
+/// The rate every Opus stream is decoded at, whatever was encoded into it.
+pub const OPUS_RATE: u32 = 48_000;
+
+/// Frames of tone in [`TINY_OPUS`]: 2 s at [`OPUS_RATE`].
+pub const OPUS_FRAMES: u64 = 96_000;
+
+/// Frames of tone in [`MONO_OPUS`]: 1 s at [`OPUS_RATE`].
+pub const MONO_OPUS_FRAMES: u64 = 48_000;
+
+/// Frames of tone in [`VORBIS_OGG`]: 1 s at [`SAMPLE_RATE`].
+pub const VORBIS_FRAMES: u64 = 44_100;
+
+/// Frames in one Opus packet as ffmpeg's libopus writes them, and as [`opus_frame`] encodes them:
+/// 20 ms at [`OPUS_RATE`].
+pub const OPUS_FRAME: u64 = 960;
+
+/// What the Opus fixtures ask a decoder to throw away before the audio proper — libopus states
+/// 312 samples, and both were encoded by it.
+pub const OPUS_PRE_SKIP: u16 = 312;
+
+/// What [`TINY_OPUS`]'s tone peaks at before it was encoded: ffmpeg's sine at 1/8 full scale,
+/// upmixed to two channels with the standard centre-to-front coefficient of 1/√2 — 2 896.
+pub const OPUS_PEAK: i32 = 2_896;
+
+/// What [`MONO_OPUS`]'s tone peaks at before it was encoded: the same sine with no upmix to halve
+/// it, so 1/8 of full scale — 4 095.
+pub const MONO_OPUS_PEAK: i32 = 4_095;
 
 /// Where [`TINY_M4B`]'s second chapter was authored: 5 seconds in.
 ///
@@ -178,6 +230,109 @@ pub fn sine_wav() -> Vec<u8> {
 /// One sample of the sine: its value in −1.0..=1.0, at the peak the channel is written with.
 fn scaled(value: f64, peak: i16) -> i16 {
     (value * f64::from(peak)).round() as i16
+}
+
+/// One Ogg page carrying `packet`, checksum and all.
+///
+/// The page that opens a stream is the one numbered zero, and it states so; `ends` states the end
+/// of the stream, which is where the granule position stops being a running count and starts being
+/// the sample the audio plays up to.
+///
+/// # Panics
+///
+/// If the packet is longer than the 4 096 bytes one page of a TAF holds, which no packet a test
+/// here builds comes near.
+pub fn ogg_page(serial: u32, sequence: u32, granule: u64, ends: bool, packet: &[u8]) -> Vec<u8> {
+    ogg_page_of(serial, sequence, granule, ends, &[packet])
+}
+
+/// One Ogg page carrying every packet handed in, in the order they were handed in.
+///
+/// A page laces its packets one behind the other and states a lacing value per 255 bytes of each,
+/// so what goes in front of the first packet is as long as everything behind it makes it.
+///
+/// # Panics
+///
+/// If the packets do not fit one page, whether by their length or by the 255 lacing values a page
+/// counts them in.
+pub fn ogg_page_of(
+    serial: u32,
+    sequence: u32,
+    granule: u64,
+    ends: bool,
+    packets: &[&[u8]],
+) -> Vec<u8> {
+    let mut page = PageBuilder::new(serial, sequence);
+    page.granule_position(granule);
+    page.flags(sequence == 0, ends);
+    for packet in packets {
+        page.push_packet(packet).expect("the packets fit one page");
+    }
+
+    page.finish()
+}
+
+/// The pages of an Ogg-Opus stream of `serial`: `head`, whatever `tags` it states behind it, and
+/// one page per audio packet.
+///
+/// One packet to a page, which keeps a lacing table out of what any test here is about. The
+/// granule positions count what the stream plays up to — the pre-skip the head states plus one
+/// [`OPUS_FRAME`] per audio packet, which is what [`opus_frame`] encodes — and the last audio page
+/// states the end of the stream.
+///
+/// # Panics
+///
+/// If any packet is longer than one page holds — see [`ogg_page`].
+pub fn opus_pages(serial: u32, head: &[u8], tags: Option<&[u8]>, audio: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut pages = vec![ogg_page(serial, 0, 0, false, head)];
+    if let Some(tags) = tags {
+        pages.push(ogg_page(serial, 1, 0, false, tags));
+    }
+
+    for (index, packet) in audio.iter().enumerate() {
+        let plays_to = u64::from(OPUS_PRE_SKIP) + (index as u64 + 1) * OPUS_FRAME;
+        let sequence = pages.len() as u32;
+        pages.push(ogg_page(
+            serial,
+            sequence,
+            plays_to,
+            index + 1 == audio.len(),
+            packet,
+        ));
+    }
+
+    pages
+}
+
+/// The `OpusTags` packet a stream states behind its head, which nothing here reads.
+///
+/// # Panics
+///
+/// If the vendor string stops leaving the padding comment room, which is a constant here.
+pub fn opus_tags() -> [u8; taf::ogg::OPUS_TAGS_LEN] {
+    taf::ogg::opus_tags("taffle", &[]).expect("the vendor string leaves room for the padding")
+}
+
+/// One 20 ms Opus packet, encoded by libopus itself so that what decodes it has something real to
+/// take apart.
+///
+/// The frame is silence: a stream built here is about the packets around this one, and silence
+/// encodes to a handful of bytes.
+///
+/// # Panics
+///
+/// If libopus refuses the rate, the channel count or the frame length Opus itself defines.
+pub fn opus_frame() -> Vec<u8> {
+    /// Room for a packet that never comes close: 20 ms of silence encodes to single digits.
+    const ROOM: usize = 4000;
+
+    let frame = [0; OPUS_FRAME as usize * CHANNELS as usize];
+    let mut encoder = Encoder::new(OPUS_RATE, Channels::Stereo, Application::Audio)
+        .expect("libopus encodes at the rate it decodes at");
+
+    encoder
+        .encode_vec(&frame, ROOM)
+        .expect("a frame of silence encodes")
 }
 
 /// A WAV whose header is sound and whose audio is not: one mono IMA ADPCM block that no decoder
