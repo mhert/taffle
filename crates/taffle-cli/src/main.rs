@@ -10,10 +10,10 @@
 mod cli;
 mod convert_cmd;
 mod duration;
+mod info_cmd;
 
 use std::process::ExitCode;
 
-use anyhow::anyhow;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
@@ -22,7 +22,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let outcome = match cli.command {
-        Some(Command::Info { .. }) => Err(anyhow!("taffle info is not built yet")),
+        Some(Command::Info { files }) => info_cmd::run(&files),
         None => convert_cmd::run(cli.convert),
     };
 

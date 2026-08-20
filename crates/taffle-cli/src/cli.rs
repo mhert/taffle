@@ -33,6 +33,13 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Inspect and validate TAF files
+    ///
+    /// Every file is read through the way a box reads one — the header block, then the audio
+    /// region one block at a time, hashed on the way — and what it holds is printed once it has
+    /// been found to hold it: the audio id, how long it plays, the bytes its audio occupies, and
+    /// the block every chapter starts at, which is what a box seeks on. A file that is not the one
+    /// its header describes is said on stderr instead and the code is 1; the files behind it are
+    /// read all the same.
     Info {
         /// The files to read.
         #[arg(value_name = "FILE.taf", required = true)]

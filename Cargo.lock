@@ -795,6 +795,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "predicates",
+ "sha1",
  "taf",
  "taf-encode",
  "taffle",

@@ -47,6 +47,9 @@ const MAX_CHAPTERS: usize = 99;
 /// cover.
 const BOOK: &str = "tiny.m4b";
 
+/// The TAF the `info` tests read: ten seconds of sine, written by teddycloud itself.
+const GOLDEN: &str = "golden-sine.taf";
+
 /// The binary this crate builds, ready to be run.
 fn taffle() -> Command {
     Command::cargo_bin("taffle").expect("the binary builds")
@@ -56,6 +59,13 @@ fn taffle() -> Command {
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../taf-encode/tests/fixtures")
+        .join(name)
+}
+
+/// The fixture `name`, where `taf` keeps the committed TAF files.
+fn taf_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../taf/tests/fixtures")
         .join(name)
 }
 
@@ -444,10 +454,205 @@ fn a_duration_that_is_no_duration_is_a_usage_error() {
 }
 
 #[test]
-fn inspecting_a_file_is_not_here_yet_and_says_so() {
+fn a_taf_is_read_back_with_everything_its_header_states() {
+    let taf = taf_fixture(GOLDEN);
+
+    // 9.66 seconds of sine in 27 blocks of audio, and the one chapter every TAF starts at block 0.
     taffle()
-        .args(["info", "book.taf"])
+        .arg("info")
+        .arg(&taf)
+        .assert()
+        .success()
+        .stdout(format!(
+            "{}\n  \
+             audio id: 444913029\n  \
+             duration: 0:09\n  \
+             audio: 110592 bytes\n  \
+             chapters: 1\n\
+             \x20     #  block  start\n\
+             \x20     1      0   0:00\n  \
+             valid\n",
+            taf.display()
+        ));
+}
+
+#[test]
+fn a_taf_whose_audio_does_not_hash_to_what_its_header_states_is_refused() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let taf = dir.path().join("tampered.taf");
+    let mut bytes = fs::read(taf_fixture(GOLDEN)).expect("the fixture reads");
+
+    // The hash the header states, one bit of it turned over: every page of the file still adds up,
+    // so the file's own SHA-1 is the one thing that catches it — which is what audio somebody
+    // changed and re-summed the pages of comes to.
+    let header = HeaderView::parse(&bytes[..BLOCK_LEN]).expect("a TAF opens with a header block");
+    let stated = *header.sha1();
+    let at = bytes[..BLOCK_LEN]
+        .windows(stated.len())
+        .position(|window| window == stated)
+        .expect("the header states its hash");
+    bytes[at] ^= 0x01;
+    fs::write(&taf, &bytes).expect("the copy is written");
+
+    taffle()
+        .arg("info")
+        .arg(&taf)
         .assert()
         .code(1)
-        .stderr(contains("info"));
+        // The frontend is the one that hashed the file, so it says both hashes: the one the header
+        // asks for and the one the audio came to.
+        .stderr(
+            contains(taf.display().to_string())
+                .and(contains("sha1"))
+                .and(contains("1 file is not the TAF its header describes")),
+        )
+        // Nothing is said about a file that is not the one its header describes.
+        .stdout("");
+}
+
+#[test]
+fn a_taf_whose_pages_do_not_add_up_is_refused_at_the_block_they_lie_in() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let taf = dir.path().join("flipped.taf");
+    let mut bytes = fs::read(taf_fixture(GOLDEN)).expect("the fixture reads");
+
+    // A byte of the audio region turned over where no checksum was fixed up after it: the page it
+    // lies in no longer sums to what it states, which is caught where the block is read rather
+    // than at the file's hash.
+    bytes[3 * BLOCK_LEN + 100] ^= 0x01;
+    fs::write(&taf, &bytes).expect("the copy is written");
+
+    taffle()
+        .arg("info")
+        .arg(&taf)
+        .assert()
+        .code(1)
+        .stderr(
+            contains(taf.display().to_string())
+                .and(contains("block 2 of the audio region"))
+                .and(contains("checksum")),
+        )
+        .stdout("");
+}
+
+#[test]
+fn a_taf_that_stops_short_is_refused_wherever_it_stops() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let whole = fs::read(taf_fixture(GOLDEN)).expect("the fixture reads");
+
+    // Cut in the middle of a block, and cut exactly where one ends: the first leaves a read that is
+    // no block at all, the second a file that is simply short of the length its header states.
+    let cases = [
+        (
+            "mid-block.taf",
+            whole.len() - 2048,
+            "2048 bytes are not one",
+        ),
+        (
+            "whole-blocks.taf",
+            whole.len() - BLOCK_LEN,
+            "106496 bytes, and its header states 110592",
+        ),
+    ];
+
+    for (name, len, said) in cases {
+        let taf = dir.path().join(name);
+        fs::write(&taf, &whole[..len]).expect("the copy is written");
+
+        taffle()
+            .arg("info")
+            .arg(&taf)
+            .assert()
+            .code(1)
+            .stderr(contains(taf.display().to_string()).and(contains(said)))
+            .stdout("");
+    }
+}
+
+#[test]
+fn a_file_that_is_no_taf_at_all_is_refused_under_its_own_name() {
+    let dir = TempDir::new().expect("a directory of its own");
+    // Audio that is not a TAF, a file too short to hold even a header block, a file that is not
+    // there at all, and a directory — which opens like a file and then does not read like one.
+    let wave = wav(dir.path(), "book.wav", &tone(0.5));
+    let stub = dir.path().join("stub.taf");
+    fs::write(&stub, b"TAF").expect("the stub is written");
+    let missing = dir.path().join("nowhere.taf");
+    let folder = dir.path().to_path_buf();
+
+    for path in [&wave, &stub, &missing, &folder] {
+        taffle()
+            .arg("info")
+            .arg(path)
+            .assert()
+            .code(1)
+            .stderr(contains(path.display().to_string()))
+            .stdout("");
+    }
+}
+
+#[test]
+fn a_book_this_binary_wrote_reads_back_as_the_book_it_wrote() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(2.0));
+    let taf = dir.path().join("book.taf");
+
+    taffle()
+        .arg(&book)
+        .args(["--chapters", "0:00,0:01"])
+        .assert()
+        .success();
+
+    // What the writer wrote, read back through the validator: the file holds the two chapters that
+    // were asked for, the second of them a second in, and every block of it adds up.
+    taffle().arg("info").arg(&taf).assert().success().stdout(
+        contains("duration: 0:02")
+            .and(contains("chapters: 2"))
+            .and(contains("      1      0   0:00"))
+            // The second chapter starts at a block of its own, wherever the packet it begins
+            // at put that block.
+            .and(contains("\n      2  "))
+            .and(contains("valid")),
+    );
+}
+
+#[test]
+fn every_file_named_is_read_and_one_that_is_no_taf_does_not_stop_the_rest() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let broken = dir.path().join("broken.taf");
+    fs::write(&broken, vec![0; 8192]).expect("the file is written");
+
+    // The bad file is said as it is met and the good one behind it is read all the same; the code
+    // is the run's, and it is 1 because one of them was not the file its header describes.
+    taffle()
+        .arg("info")
+        .arg(&broken)
+        .arg(taf_fixture(GOLDEN))
+        .assert()
+        .code(1)
+        .stdout(contains("audio id: 444913029").and(contains("valid")))
+        .stderr(
+            contains(broken.display().to_string())
+                .and(contains("1 file is not the TAF its header describes")),
+        );
+}
+
+#[test]
+fn the_files_that_were_not_tafs_are_counted_in_what_the_run_comes_to() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let broken: Vec<PathBuf> = (0..2)
+        .map(|at| {
+            let path = dir.path().join(format!("broken{at}.taf"));
+            fs::write(&path, vec![0; 8192]).expect("the file is written");
+
+            path
+        })
+        .collect();
+
+    taffle()
+        .arg("info")
+        .args(&broken)
+        .assert()
+        .code(1)
+        .stderr(contains("2 files are not the TAFs their headers describe"));
 }
