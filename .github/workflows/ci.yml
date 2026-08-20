@@ -1,0 +1,176 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      # taf-encode decodes Opus through libopus. Without the system library, its bindings fall
+      # back to building a vendored copy, which takes minutes and needs a CMake older than 4.
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - uses: EmbarkStudios/cargo-deny-action@v2
+  test:
+    strategy:
+      # One platform's failure is worth knowing about while the other is still being found out.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      # `audiopus_sys` probes pkg-config first and only builds its vendored copy when that comes up
+      # empty — a CMake build whose `cmake_minimum_required(VERSION 3.1)` CMake 4 refuses outright.
+      # So the library is installed and the probe is left to succeed. On macOS the probe asks for a
+      # static libopus, which is what Homebrew's formula builds. `LIBOPUS_LIB_DIR` is the lever if
+      # pkg-config ever misses it.
+      - if: runner.os == 'macOS'
+        run: |
+          brew install opus pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - run: cargo test --workspace --all-features
+  no-std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: riscv32imc-unknown-none-elf }
+      - run: cargo build -p taf --no-default-features --target riscv32imc-unknown-none-elf
+      - run: cargo build -p taf --no-default-features --features alloc --target riscv32imc-unknown-none-elf
+  coverage:
+    # Coverage is a gate on what a change touched rather than on the tree it landed in, so it needs
+    # something to compare against: the merge base of the pull request. A push carries no such base,
+    # and the pull request that brought it has already been measured.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: llvm-tools-preview }
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-llvm-cov }
+      - name: The commit this branch is measured against
+        env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
+        # A branch that shares no history with its base has no merge base — which is what the first
+        # pull request into an empty repository looks like. The empty tree stands in for one there,
+        # so the diff is every line of the branch and the gate holds rather than dying.
+        run: |
+          BASE=$(git merge-base "$BASE_SHA" HEAD || git hash-object -t tree /dev/null)
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+      - name: Every line the branch touched is a line the tests run
+        run: |
+          # `sort` and `comm` have to agree on what order is, and only one collation is stated in
+          # both places if it is stated here. The rest is so that a step which breaks says so:
+          # an awk that dies, a pipe that fails or an unset name is a red job, not a green one
+          # standing on an empty file.
+          set -euo pipefail
+          export LC_ALL=C
+          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+          # The lines this branch added, as "<path>:<line>", read off the plus side of every hunk
+          # header. `-U0` is what makes those the changed lines rather than three lines of
+          # untouched context around each of them.
+          git -c diff.mnemonicPrefix=false diff -U0 "$BASE" HEAD -- '*.rs' > lines.diff
+          awk -v root="$PWD/" '
+            /^\+\+\+ \/dev\/null/ { file = ""; next }
+            /^\+\+\+ b\// { file = substr($0, 7); next }
+            /^@@/ {
+              if (file == "") next
+              split($3, hunk, ",")
+              at = substr(hunk[1], 2) + 0
+              left = (hunk[2] == "" ? 1 : hunk[2] + 0)
+              while (left-- > 0) print root file ":" at++
+            }' lines.diff | sort -u > changed-lines.txt
+
+          # The lines no test ran, counted across every copy of the code: a line reached through one
+          # instantiation of a generic is a line the tests run, whatever the other copies did.
+          awk '/^SF:/ { file = substr($0, 4); next }
+               /^DA:/ { split(substr($0, 4), da, ","); if (da[2] == 0) print file ":" da[1] }
+              ' lcov.info | sort -u > uncovered-lines.txt
+
+          # Four exemptions, each pinned to the lines it is about and each with its own reason. The
+          # pull request that creates the tree creates these lines too, so without them the first
+          # one would be red for code it did not write — but nothing else in those files is exempt,
+          # and a line added beside them is gated like any other.
+
+          # The arm of `From<WriterIoError> for ConvertError` that stands for a writer error the
+          # writer cannot yet return.
+          printf '%s\n' "$PWD/crates/taf-encode/src/convert.rs:368" > allowed.txt
+
+          # A `break` that ends a walk which does not advance. Nothing can reach it while `atom_at`
+          # refuses an atom shorter than its own header — the test
+          # `an_atom_that_states_a_length_of_its_own_header_or_less_ends_the_walk` crafts exactly
+          # that file, and the walk ends a function earlier — and it is kept because the invariant
+          # it leans on is stated somewhere else.
+          printf '%s\n' "$PWD/crates/taf-encode/src/decode/mp4_chapters.rs:127" >> allowed.txt
+
+          # The body of `a_real_audiobook_states_every_one_of_its_chapters`, which is `#[ignore]`d
+          # and skips itself besides: it reads the audiobook `TAFFLE_REAL_BOOK` names, and a runner
+          # names none.
+          seq 474 497 | sed "s|^|$PWD/crates/taf-encode/src/decode/mp4_chapters.rs:|" >> allowed.txt
+
+          # `Broken::read`, of the source that says it can be seeked and then cannot. The test it is
+          # there for is about the seek, which is refused in front of every read — so the reading
+          # half of that source is what nothing reaches, and it exists because a `MediaSource` has
+          # to be readable to be one at all.
+          seq 524 526 | sed "s|^|$PWD/crates/taf-encode/src/decode/mp4_chapters.rs:|" >> allowed.txt
+
+          # Whole-line matches, so that an exemption for line 368 is not also one for line 36.
+          comm -12 changed-lines.txt uncovered-lines.txt > uncovered-changed.txt
+          grep -xF -f allowed.txt uncovered-changed.txt > allowed-gaps.txt || true
+          grep -vxF -f allowed.txt uncovered-changed.txt > gaps.txt || true
+
+          if [ -s allowed-gaps.txt ]; then
+            echo "allowed for the reasons stated in this workflow:"
+            cat allowed-gaps.txt
+          fi
+          if [ -s gaps.txt ]; then
+            echo "these lines the branch changed are lines no test runs:"
+            cat gaps.txt
+            exit 1
+          fi
+  mutants:
+    # Same base, same reason as the coverage job.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # A shard of an ordinary pull request is a handful of mutants and takes minutes. A shard of the
+    # first one — whose diff creates every file in the tree, and with it all 1107 mutants the
+    # workspace holds — is around 90 of them, which is where the hour comes from. The bound is
+    # stated so that a job which runs long dies with a verdict rather than at GitHub's own six-hour
+    # ceiling, where it would die with none.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-mutants }
+      - name: The commit this branch is measured against
+        env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
+        # Same stand-in as the coverage job's, for the same branch that shares no history with what
+        # it is opened against.
+        run: |
+          BASE=$(git merge-base "$BASE_SHA" HEAD || git hash-object -t tree /dev/null)
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+      - name: Every mutant of the code the branch changed dies
+        # The diff keeps its default context here: `--in-diff` matches changed functions, not lines.
+        run: |
+          git -c diff.mnemonicPrefix=false diff "$BASE" HEAD > changed.diff
+          cargo mutants --workspace --in-diff changed.diff \
+            --shard ${{ matrix.shard }}/12 --jobs 4 --timeout-multiplier 2
