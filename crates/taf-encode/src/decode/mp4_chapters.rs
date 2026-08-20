@@ -292,6 +292,15 @@ mod tests {
         file
     }
 
+    /// Where the audiobook the ignored test below reads is, on the machine running it.
+    ///
+    /// A real book is sixty megabytes of somebody's audio and no part of this repository, so the
+    /// test that reads one is told where to find it instead of being given it. What that test
+    /// states is what one particular recording holds — sixteen chapters, the second of them at
+    /// 195.395 s — so the variable names *that* book, and a run that states none has nothing to
+    /// read and says so.
+    const REAL_BOOK: &str = "TAFFLE_REAL_BOOK";
+
     /// The chapters read out of a file, which is expected to be rewound afterwards.
     fn chapters_of(file: Vec<u8>) -> Vec<Mp4Chapter> {
         let mut source = Cursor::new(file);
@@ -461,11 +470,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "reads an audiobook that only exists on the machine this crate is written on"]
+    #[ignore = "reads a real audiobook, which is the one TAFFLE_REAL_BOOK names"]
     fn a_real_audiobook_states_every_one_of_its_chapters() {
-        let path = "/home/mhert/OpenAudible/books/\
-                    Grimm und Möhrchen machen Pause von zu Hause (Teil 3).m4b";
-        let mut book = std::fs::File::open(path).expect("the book is on this machine");
+        let Some(path) = std::env::var_os(REAL_BOOK) else {
+            eprintln!("skipped: {REAL_BOOK} names no audiobook to read");
+
+            return;
+        };
+        let mut book = std::fs::File::open(path).expect("the book is where the variable says");
 
         let chapters = read(&mut book).expect("a file rewinds");
 

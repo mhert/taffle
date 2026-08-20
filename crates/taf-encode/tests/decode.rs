@@ -19,6 +19,15 @@ use std::path::PathBuf;
 use symphonia::core::io::{MediaSource, ReadOnlySource};
 use taf_encode::{open_source, AudioSource, DecodeError, SourceSpec};
 
+/// Where the audiobook the ignored test at the end reads is, on the machine running it.
+///
+/// A real book is sixty megabytes of somebody's audio and no part of this repository, so the test
+/// that reads one is told where to find it instead of being given it. What that test states is
+/// what one particular recording holds — an hour of AAC at 44 100 Hz, sixteen chapters and a
+/// cover — so the variable names *that* book, and a run that states none has nothing to read and
+/// says so.
+const REAL_BOOK: &str = "TAFFLE_REAL_BOOK";
+
 /// The WAV fixture, opened.
 fn wav_source() -> Box<dyn AudioSource> {
     open_source(Box::new(Cursor::new(fixtures::sine_wav()))).unwrap()
@@ -804,14 +813,17 @@ fn a_container_of_no_audio_at_all_has_nothing_to_decode() {
 }
 
 #[test]
-#[ignore = "reads an audiobook that only exists on the machine this crate is written on"]
+#[ignore = "reads a real audiobook, which is the one TAFFLE_REAL_BOOK names"]
 fn a_real_audiobook_decodes_whole_with_everything_it_states_about_itself() {
     // 64 minutes and 12 seconds of it, at 44 100 Hz.
     const SECONDS: u64 = 3_852;
 
-    let path = "/home/mhert/OpenAudible/books/\
-                Grimm und Möhrchen machen Pause von zu Hause (Teil 3).m4b";
-    let book = std::fs::File::open(path).expect("the book is on this machine");
+    let Some(path) = std::env::var_os(REAL_BOOK) else {
+        eprintln!("skipped: {REAL_BOOK} names no audiobook to read");
+
+        return;
+    };
+    let book = std::fs::File::open(path).expect("the book is where the variable says");
 
     let mut source = open_source(Box::new(book)).expect("the book opens");
 
