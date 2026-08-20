@@ -454,6 +454,25 @@ fn a_duration_that_is_no_duration_is_a_usage_error() {
 }
 
 #[test]
+fn a_chapter_past_the_end_of_the_audio_is_said_in_the_clock_it_was_typed_in() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(2.0));
+
+    // The engine counts in frames, because that is what it works in. A person typed 0:20 over two
+    // seconds of audio and reads the answer, so the times are said back in the clock they came in —
+    // with the engine's own line, frames and all, still behind it.
+    taffle()
+        .arg(&book)
+        .args(["--chapters", "0:00,0:20"])
+        .assert()
+        .code(1)
+        .stderr(
+            contains("the chapter at 0:20 is past the end of the audio, which runs 0:02")
+                .and(contains("beyond total length")),
+        );
+}
+
+#[test]
 fn a_taf_is_read_back_with_everything_its_header_states() {
     let taf = taf_fixture(GOLDEN);
 

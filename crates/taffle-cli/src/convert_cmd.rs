@@ -9,10 +9,11 @@
 //! to what was asked.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
-use taf_encode::{ChapterMode, Conversion, Progress, SilenceOpts};
-use taffle::{default_output_path, run_convert, ConvertJob, JobOutcome};
+use taf_encode::{ChapterError, ChapterMode, Conversion, ConvertError, Progress, SilenceOpts};
+use taffle::{default_output_path, run_convert, ConvertJob, JobError, JobOutcome};
 
 use crate::cli::ConvertArgs;
 use crate::duration::{clock, RATE};
@@ -46,7 +47,7 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     // Whatever is said next — the file that was written, or why it was not — begins on a line of
     // its own.
     line.finish();
-    let outcome = outcome?;
+    let outcome = outcome.map_err(in_clock_time)?;
 
     // A plan nobody typed is settled by the conversion, and this is where it stands: the chapters
     // the file holds.
@@ -122,6 +123,42 @@ fn refuse_collision(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> 
         "the output {} is one of the inputs: converting it would write over the audio being read",
         clash.display()
     );
+}
+
+/// A chapter that lies past the end of the audio, said in the clock it was typed in.
+///
+/// The engine counts in frames, because frames are what it works in, and it says so: *explicit
+/// chapter at 960000 beyond total length 96000*. What a person typed was `0:20`, and what they read
+/// back should be the same thing — so the frontend that took the time in puts the times in front of
+/// the engine's own line rather than in the place of it, since the frames are the exact answer and
+/// the clock is the legible one.
+///
+/// Every other failure is handed on as it stands.
+fn in_clock_time(error: JobError) -> anyhow::Error {
+    // The two layers in between state nothing of their own — they are `transparent`, so the chain
+    // renders as the chapter error alone — and this is where they are seen through.
+    let out_of_range = match &error {
+        JobError::Convert(ConvertError::Chapters(ChapterError::OutOfRange { offset, total })) => {
+            Some((*offset, *total))
+        }
+        _ => None,
+    };
+    let error = anyhow::Error::new(error);
+
+    let Some((offset, total)) = out_of_range else {
+        return error;
+    };
+
+    error.context(format!(
+        "the chapter at {} is past the end of the audio, which runs {}",
+        at_clock(offset),
+        at_clock(total)
+    ))
+}
+
+/// Where `frames` of a conversion's audio lie, on a clock.
+fn at_clock(frames: u64) -> String {
+    clock(Duration::from_secs(frames / u64::from(RATE)))
 }
 
 /// How many chapters a stated plan comes to, where the caller stated one.
