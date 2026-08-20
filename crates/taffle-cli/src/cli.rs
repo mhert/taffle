@@ -58,6 +58,9 @@ pub struct ConvertArgs {
     pub inputs: Vec<PathBuf>,
 
     /// Output .taf. Default: first input's name + .taf
+    ///
+    /// Whatever is already at that path is emptied and written over — the conversion writes into
+    /// the file it made room for, whether that name held a TAF, a book or anything else.
     #[arg(short, long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
