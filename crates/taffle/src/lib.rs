@@ -1,10 +1,23 @@
-//! File-oriented conversion workflows shared by any frontend (CLI today, GUI anticipated).
+//! File-oriented workflows shared by any frontend (CLI today, GUI anticipated): converting audio
+//! into a TAF, and reading one back.
 //!
 //! The engine below this takes readers and hands back a report; a person converting an audiobook
 //! has files, and wants the one that comes out named after the one that went in with its cover
 //! beside it. That gap is the whole of this crate: paths in, [`taf_encode::convert()`] in the
 //! middle, a `.taf` and a picture out. Nothing here decodes, encodes or decides anything about the
 //! audio.
+//!
+//! [`inspect`] is the same gap on the way back: a path in, and what the file holds out — read
+//! through block by block and hashed on the way, so that what a frontend shows has been checked
+//! rather than believed.
+//!
+//! # A frontend depends on this crate and no other
+//!
+//! What these workflows hand back is made of `taf-encode`'s types and `taf`'s, so those are
+//! re-exported here in full: a frontend states its conversion in [`Conversion`], renders
+//! [`Progress`] as it runs and reads a [`ConversionReport`] at the end without naming either crate
+//! below this one. Which is what keeps a frontend from depending on a version of them that is not
+//! the version these workflows are built on.
 //!
 //! # The one clock read
 //!
@@ -22,18 +35,27 @@
 //! the conversion's own report beside it, and never as an [`Err`].
 
 mod cover;
+mod inspect;
 mod output;
 
 use std::fs::File;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use taf::id::AudioId;
-use taf_encode::{
-    convert, ChapterError, Conversion, ConversionReport, ConvertError, Input, Progress,
-};
+use taf_encode::{convert, Input};
 
+pub use inspect::{inspect, read_through, ChapterRead, InspectError, Inspection};
 pub use output::default_output_path;
+
+// What the workflows above hand back and take in, from the crates the types are defined in: a
+// frontend names them through here rather than depending on `taf` and `taf-encode` itself.
+pub use taf::header::HeaderError;
+pub use taf::id::{AudioId, BlockIndex};
+pub use taf::reader::ValidateError;
+pub use taf_encode::{
+    ChapterError, ChapterMode, ChapterOut, Conversion, ConversionReport, ConvertError, Cover,
+    Progress, SilenceOpts,
+};
 
 /// A conversion of files on disk: what goes in, where it comes out, and what is done to the audio
 /// on the way.

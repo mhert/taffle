@@ -13,15 +13,15 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-sha1 = { workspace = true }
-taf = { workspace = true }
-taf-encode = { workspace = true }
 taffle = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+# What the binary wrote is read back by `taf`'s own validator rather than by anything this crate
+# builds, so a test states what is in the file and not what the code that wrote it believes.
+taf = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

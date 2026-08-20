@@ -158,7 +158,7 @@ if every file validated — structure *and* SHA-1.
 |---|---|
 | [`taf`](crates/taf) | The Tonie Audio Format itself: header codec, Ogg framing, packet padding, reader and writer. `no_std`, no dependencies, hashing inverted to a trait — small enough for the box's own microcontroller. |
 | [`taf-encode`](crates/taf-encode) | The conversion engine: decode (symphonia, libopus), resample to 48 kHz stereo, trim and pad silence, resolve chapters, encode Opus into `taf`'s writer. |
-| [`taffle`](crates/taffle) | The application layer a frontend sits on: paths, the output name, the cover beside the file, progress. |
+| [`taffle`](crates/taffle) | The application layer a frontend sits on: paths, the output name, the cover beside the file, progress — and reading a TAF back, block by block, to say whether it holds. |
 | [`taffle-cli`](crates/taffle-cli) | The `taffle` binary — argument parsing, progress, error rendering, and nothing else. |
 
 `crates/taf/FORMAT.md` describes the file format in full and cites teddycloud for

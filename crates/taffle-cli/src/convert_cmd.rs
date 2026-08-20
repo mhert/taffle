@@ -12,8 +12,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use taf_encode::{ChapterError, ChapterMode, Conversion, ConvertError, Progress, SilenceOpts};
-use taffle::{default_output_path, run_convert, ConvertJob, JobError, JobOutcome};
+use taffle::{
+    default_output_path, run_convert, ChapterError, ChapterMode, Conversion, ConvertError,
+    ConvertJob, JobError, JobOutcome, Progress, SilenceOpts,
+};
 
 use crate::cli::ConvertArgs;
 use crate::duration::{clock, RATE};
