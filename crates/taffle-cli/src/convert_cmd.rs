@@ -211,11 +211,11 @@ struct ProgressLine {
 impl ProgressLine {
     /// Shows what the conversion is doing, where there is anything new to show.
     fn show(&mut self, event: Progress) {
-        match event {
-            Progress::Encoded { samples_done } => self.encoded(samples_done),
-            // Which input is being read and the file being closed are both this line standing
-            // still: it is about how much audio is in, and neither of them puts any in.
-            Progress::Decoding { .. } | Progress::Finalizing => {}
+        // Everything else leaves this line standing still: it says how much audio is in, and
+        // neither the input being read nor the file being closed puts any in — nor does whatever
+        // the engine comes to state next, until this line is taught to state it.
+        if let Progress::Encoded { samples_done } = event {
+            self.encoded(samples_done);
         }
     }
 

@@ -154,6 +154,7 @@ pub struct Conversion {
 
 /// What a conversion is doing, as it does it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Progress {
     /// The conversion has reached an input and is reading it, counted over all of them.
     Decoding {

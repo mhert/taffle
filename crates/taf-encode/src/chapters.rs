@@ -16,6 +16,7 @@
 
 /// How the chapters of a conversion are decided.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ChapterMode {
     /// The marks the input carried, where there is one input; one chapter per input, where there
     /// is more than one.
