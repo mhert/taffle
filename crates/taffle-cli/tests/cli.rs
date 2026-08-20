@@ -23,6 +23,7 @@
 )]
 
 use std::f64::consts::TAU;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -136,6 +137,15 @@ fn chapters_of(path: &Path) -> usize {
         .expect("the file is the one its header describes");
 
     header.chapter_count()
+}
+
+/// `hash` written the way a hash is quoted, which is how a run states the two it compared.
+fn hex(hash: &[u8; 20]) -> String {
+    hash.iter().fold(String::new(), |mut text, byte| {
+        write!(text, "{byte:02x}").expect("a string takes what is written into it");
+
+        text
+    })
 }
 
 /// A chapter list of `count` offsets a tenth of a second apart, beginning `from` tenths into the
@@ -513,6 +523,11 @@ fn a_taf_whose_audio_does_not_hash_to_what_its_header_states_is_refused() {
     bytes[at] ^= 0x01;
     fs::write(&taf, &bytes).expect("the copy is written");
 
+    // The audio was left alone, so it still hashes to what the file used to state; the header now
+    // states that hash with one bit turned over.
+    let mut tampered = stated;
+    tampered[0] ^= 0x01;
+
     taffle()
         .arg("info")
         .arg(&taf)
@@ -522,7 +537,11 @@ fn a_taf_whose_audio_does_not_hash_to_what_its_header_states_is_refused() {
         // asks for and the one the audio came to.
         .stderr(
             contains(taf.display().to_string())
-                .and(contains("sha1"))
+                .and(contains(format!(
+                    "sha1 its header states: header {}, audio {}",
+                    hex(&tampered),
+                    hex(&stated)
+                )))
                 .and(contains("1 file is not the TAF its header describes")),
         )
         // Nothing is said about a file that is not the one its header describes.
