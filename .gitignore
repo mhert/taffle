@@ -2,3 +2,5 @@
 /mutants.out*
 plans/
 specs/
+.superpowers/
+.claude/
