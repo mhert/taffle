@@ -9,13 +9,72 @@
 //! not known until it has been read to the end, so nothing that has to be settled in front of the
 //! audio may depend on it.
 //!
+//! # The three ways a plan comes about
+//!
+//! 1. **The caller states it.** [`ChapterMode::Explicit`] is what `--chapters` parsed to, and it
+//!    overrides everything: neither the marks an input carries nor the boundaries between the
+//!    inputs are consulted.
+//! 2. **One input, and its own marks.** [`ChapterMode::Auto`] over a single input takes the marks
+//!    that input carried — an m4b's chapter atom, and whatever else a container states.
+//! 3. **More than one input, one chapter each.** [`ChapterMode::Auto`] over several inputs puts a
+//!    chapter where each of them begins, and does not look at the marks they carry.
+//!
+//! # Why several files are the chapters and their own marks are not
+//!
+//! Somebody who hands a converter twelve files has stated what the chapters are by handing over
+//! twelve files. Reading the marks inside them as well would put chapters where nobody asked for
+//! any — and it could only ever be a mix of the two, since a set where one file carries marks and
+//! eleven carry none is the ordinary case rather than the odd one. So the boundaries win whole:
+//! that is one rule instead of a per-file lottery, and the way to have a file's own marks used is
+//! to convert that file on its own or to state the plan outright.
+//!
+//! # What every plan holds
+//!
+//! A plan begins at offset 0, its offsets strictly increase, and every offset behind the first lies
+//! in front of the end of the audio. The first two are what a chapter table *is* — a TAF's first
+//! chapter begins where its audio does, and two chapters in one place are one chapter — and the
+//! third is what makes every offset a place where there is something to play.
+//!
+//! What the stream then does with the plan is its own: the silence operations can move two chapters
+//! onto the same frame by trimming everything between them away, and a file holds a block once, so
+//! the chapters the file comes out with can be fewer than the plan had. A plan goes into the stream
+//! strictly increasing all the same.
+//!
+//! # A mark is advisory, an offset the caller states is not
+//!
+//! An offset that a plan cannot hold — one at or behind the end of the audio, one that does not lie
+//! behind the offset in front of it — is made to fit where it came out of a file and refused where
+//! the caller stated it. What separates them is what the answer is worth to whoever gets it: a
+//! container's chapter atom is not something its owner can correct, so a book whose marks are half
+//! nonsense is still a book to convert, with the chapters of it that do make sense; an explicit
+//! plan is what somebody typed a moment ago, so an offset in it that cannot be a chapter is a
+//! mistake to state plainly rather than to quietly leave out.
+//!
+//! Making them fit is one pass over them: the marks are sorted into the order they play in, since
+//! a container states them in whatever order it likes, and a mark where a chapter already begins is
+//! that chapter rather than another, under the name the first mark there carried. A mark at or
+//! behind the end of the audio needs no rule of its own — the stream ends in front of the block it
+//! would have begun, so it never begins one.
+//!
+//! An explicit plan is held to both halves of that instead, and refused: offsets that do not
+//! strictly increase are [`ChapterError::NotSorted`] before a byte is written, since nothing has to
+//! be read to see it, and the first offset at or behind the end of the audio is
+//! [`ChapterError::OutOfRange`] once the audio has run out, which is when that end is known.
+//!
+//! # The chapter a book has whatever is in it
+//!
+//! Offset 0 is in range even where there is no audio at all, because the first chapter of a TAF is
+//! not something a plan chooses: it begins where the file's audio begins, and a file whose audio is
+//! empty still has that one chapter. Every other offset has to be a place there is audio at — which
+//! is also why an input of no length begins no chapter of its own in a set of them: the chapter it
+//! would begin is the one the file behind it begins, and a file holds a block once.
+//!
 //! # The inputs are one stream, except where their boundaries are the chapters
 //!
-//! [`ChapterMode::Auto`] over several inputs puts a chapter where each of them begins, and those
-//! places are not known in front of the audio — so each input is run as a stream of its own and its
-//! chapter is begun where the one in front of it ended. The leading silence operations belong to
-//! the first of them; the per-chapter ones belong to every one of them, which is what makes a file
-//! boundary a chapter start in every sense.
+//! Where the boundaries are the chapters, those places are not known in front of the audio — so
+//! each input is run as a stream of its own and its chapter is begun where the one in front of it
+//! ended. The leading silence operations belong to the first of them; the per-chapter ones belong
+//! to every one of them, which is what makes a file boundary a chapter start in every sense.
 //!
 //! Everything else — one input, or a plan the caller stated — is one stream over every input there
 //! is, because a chapter offset is counted over the audio as a whole and the stage that moves those
@@ -536,13 +595,15 @@ fn silence(opts: &SilenceOpts, base: usize) -> SilenceOpts {
 ///
 /// Every plan begins at offset 0, since the first chapter of a TAF begins where its audio does, and
 /// its offsets strictly increase: a mark where a chapter already begins is that chapter rather than
-/// another, name and all, and one in front of the chapter already planned is no chapter of its own.
-/// Which is [`resolve_chapters`](crate::resolve_chapters)' rule for marks, with the one half of it
-/// that needs a length left to the stream: a mark behind the end of the audio never begins a
-/// chapter there, and nothing knows where that end is until the audio has run out.
+/// another, under the name the first mark there carried.
 ///
 /// Marks come out of a container in the order the container states them, which is not necessarily
-/// the order they play in.
+/// the order they play in — so they are sorted here, and the sort is stable, which is what makes
+/// the first mark stated at a place the one that names it.
+///
+/// The half of the rule that needs a length is the stream's: a mark at or behind the end of the
+/// audio never begins a chapter, because the stream ends in front of the block it would have begun
+/// — and nothing knows where that end is until the audio has run out.
 fn authored(mut marks: Vec<Chapter>) -> Vec<Chapter> {
     marks.sort_by_key(|mark| mark.offset);
 
@@ -583,8 +644,8 @@ fn stated(offsets: &[u64]) -> Vec<Chapter> {
     plan
 }
 
-/// Whether the offsets the caller stated could be a plan at all: the half of
-/// [`resolve_chapters`](crate::resolve_chapters)' check that needs no length.
+/// Whether the offsets the caller stated could be a plan at all: the half of the check that needs
+/// no length, and so the half that is answered before anything is written.
 fn increasing(offsets: &[u64]) -> Result<(), ChapterError> {
     let mut previous = None;
     for offset in offsets.iter().copied() {

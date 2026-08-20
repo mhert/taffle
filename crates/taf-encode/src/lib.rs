@@ -11,7 +11,7 @@ pub mod decode;
 mod encode;
 pub mod pcm;
 
-pub use chapters::{resolve_chapters, ChapterError, ChapterMode};
+pub use chapters::{ChapterError, ChapterMode};
 pub use convert::{
     convert, ChapterOut, Conversion, ConversionReport, ConvertError, Input, Progress,
 };
