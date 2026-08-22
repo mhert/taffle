@@ -19,6 +19,7 @@
 //! carry the chapter marks an m4b states behind its audio.
 
 pub mod chapters;
+mod chunk;
 pub mod convert;
 pub mod decode;
 mod encode;

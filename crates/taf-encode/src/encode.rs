@@ -50,7 +50,7 @@ pub(crate) const FRAME: u32 = 2_880;
 
 /// The same frame as the samples it is handed over as: [`FRAME`] of each of the two channels a TAF
 /// carries, interleaved.
-const FRAME_SAMPLES: usize = FRAME as usize * 2;
+pub(crate) const FRAME_SAMPLES: usize = FRAME as usize * 2;
 
 /// What the encoder is asked to spend on a second of audio, in bits.
 const BITRATE: i32 = 96_000;
