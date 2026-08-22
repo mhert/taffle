@@ -1,0 +1,435 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the version to bump (Semantic Versioning)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      dry_run:
+        description: "Preview the bump and build artifacts without committing, tagging, or releasing (uncheck for a real release)"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+# A release must never be cut short: cancelling one mid-flight can stop it after
+# the bump commit and the tag have been pushed but before any asset was uploaded,
+# leaving a published tag with nothing behind it and a draft release nobody
+# finishes. A second dispatch therefore queues behind the first rather than
+# killing it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_release: ${{ steps.v.outputs.is_release }}
+      ref: ${{ steps.v.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - id: v
+        name: Resolve version and mode
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY: ${{ github.event.inputs.dry_run }}
+          BUMP: ${{ github.event.inputs.bump }}
+          REF_NAME: ${{ github.ref_name }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          # Re-running a real dispatched release does not resume the one that failed,
+          # it mints another: the tag the first attempt pushed is now the floor, so
+          # the bump below returns the next version and the whole commit-tag-draft
+          # sequence runs again, orphaning the release already published. Refuse
+          # instead. A dry run touches nothing, so it stays freely re-runnable.
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY" = "false" ] && [ "$ATTEMPT" != "1" ]; then
+            echo "::error::attempt $ATTEMPT of a real release would create a second version and orphan the one the first attempt released; dispatch a fresh run instead"
+            exit 1
+          fi
+          if [ "$EVENT" = "push" ]; then
+            version="${REF_NAME#v}"; is_release=true; ref=""
+            # Every artifact is named after the tag, but the binaries inside them are
+            # built from this checkout, so a tag pushed at a commit whose workspace
+            # version differs would ship a 0.2.0 package holding a binary that reports
+            # 0.1.0 -- and nothing downstream would notice, because the deb version,
+            # the PKGBUILD pkgver and the installer's -DVERSION are all injected from
+            # the tag. Read the field with the same anchored expression
+            # scripts/bump-version.sh writes it with, so the two agree on which line
+            # is the workspace version.
+            committed="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' Cargo.toml | head -n1)"
+            if [ "$version" != "$committed" ]; then
+              echo "::error::tag v$version was pushed at a commit whose workspace version is $committed; the artifacts would be named for a version their binaries do not report"
+              exit 1
+            fi
+          else
+            # Dispatch: bump the selected component from the newest published
+            # version, not this checkout's committed version. The floor is the
+            # highest vX.Y.Z tag on origin; bumping from it keeps releases moving
+            # forward even if the committed version has drifted behind the last
+            # release (e.g. after a history rewrite). With no tags the floor is
+            # empty and bump-version.sh falls back to the committed version. This
+            # edits the working tree (Cargo.toml, Cargo.lock, packaging/arch/PKGBUILD);
+            # the commit step below persists it on a real release, and a dry run
+            # discards it with the job.
+            floor="$(git ls-remote --tags origin 'v*' 2>/dev/null \
+              | sed -E 's#.*refs/tags/v##; s#\^\{\}$##' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -n1 || true)"
+            version="$(BUMP_FLOOR="$floor" sh scripts/bump-version.sh "$BUMP")"
+            if [ "$DRY" = "false" ]; then is_release=true; ref="v$version"; else is_release=false; ref=""; fi
+          fi
+          {
+            echo "version=$version"
+            echo "is_release=$is_release"
+            echo "ref=$ref"
+          } >> "$GITHUB_OUTPUT"
+      - name: Commit bump, tag, and draft release
+        if: steps.v.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          VERSION: ${{ steps.v.outputs.version }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          # On a manual real release, persist the bump and create the tag in THIS run.
+          # Pushes made with GITHUB_TOKEN (both the branch push and the tag push) do not
+          # trigger any workflow, so this re-runs neither CI nor Release -- nothing here
+          # depends on that: every build job runs in this same run and builds the tagged
+          # commit.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+              echo "::error::tag v$VERSION already exists"; exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            # The bump was applied to the working tree in the previous step.
+            git add Cargo.toml Cargo.lock packaging/arch/PKGBUILD
+            git commit -m "chore(release): v$VERSION"
+            git push origin "HEAD:$BRANCH"
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+          fi
+          # A release triggered by a tag push can be re-run, and the tag it was named
+          # for already exists, so the draft the first attempt created is still there.
+          # An unconditional create would die on "already_exists" and leave the
+          # operator to delete that draft by hand before retrying.
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release v$VERSION already exists; leaving it as it is"
+          else
+            gh release create "v$VERSION" --draft --title "v$VERSION" --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi
+
+  # Distro-native Debian/Ubuntu packages: each builds in its own distro container
+  # so the binary links that distro's libopus and the Depends resolve against it.
+  deb:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "ubuntu:24.04", tag: ubuntu24.04 }
+          - { image: "debian:13", tag: debian13 }
+    container: ${{ matrix.image }}
+    steps:
+      - name: Build deps
+        run: |
+          apt-get update
+          # ca-certificates: the container has none, so the rustup installer's
+          # HTTPS download fails with a curl (77) certificate error otherwise.
+          # python3: scripts/smoke.sh writes its test WAV with it.
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config libopus-dev python3
+          # gh is not in the distro repos, and the release upload runs inside this
+          # container, so install it from GitHub's apt repository.
+          install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y gh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - name: Rust and cargo-deb
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.94.0
+          . "$HOME/.cargo/env"
+          # Pinned like every other toolchain in this workflow: this is the tool that
+          # builds the package Debian and Ubuntu users install, so a new version of it
+          # must not reach a release without somebody having looked at it first.
+          cargo install cargo-deb --version 3.7.0 --locked
+      - name: Build + package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --locked -p taffle-cli
+          cargo deb -p taffle-cli --no-build --deb-version "$VERSION"
+          mv target/debian/*.deb "taffle_${VERSION}_amd64_${{ matrix.tag }}.deb"
+      - name: The package declares the libopus it links
+        # A package whose $auto silently resolved to nothing installs cleanly and
+        # then fails to run, which is the worse failure of the two because it
+        # reaches the user rather than the build.
+        run: |
+          dpkg -I taffle_*_${{ matrix.tag }}.deb
+          dpkg -I taffle_*_${{ matrix.tag }}.deb | grep -q 'Depends:.*libopus'
+      - name: Install it and convert real audio with it
+        run: |
+          apt-get install -y ./taffle_*_${{ matrix.tag }}.deb
+          sh scripts/smoke.sh taffle
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ "${{ needs.prepare.outputs.is_release }}" != "true" ]; then exit 0; fi
+          gh release upload "v$VERSION" taffle_*_${{ matrix.tag }}.deb --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "deb-${{ matrix.tag }}", path: "*.deb" }
+
+  # Distro-native Arch package: makepkg only runs on Arch, so this builds in an
+  # archlinux container and ships the built package plus the PKGBUILD.
+  arch:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container: archlinux:latest
+    steps:
+      # The archlinux image ships no git, so actions/checkout would fall back to
+      # an API tarball with no .git and the git archive below would fail; install
+      # git first so checkout clones a real repository.
+      - name: Install git before checkout
+        run: pacman -Sy --noconfirm git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - name: Toolchain
+        # github-cli: the release upload runs inside this container.
+        # python: scripts/smoke.sh writes its test WAV with it.
+        run: pacman -Syu --noconfirm base-devel git namcap rust opus python github-cli
+      - name: Materialize PKGBUILD for this version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cp packaging/arch/PKGBUILD .
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
+          git config --global --add safe.directory '*'
+          # makepkg uses a same-named local file over the source= URL (checksums
+          # skipped below), so the dry run builds without any published tag
+          # existing yet.
+          git archive --format=tar.gz \
+            --prefix="taffle-$VERSION/" \
+            -o "taffle-$VERSION.tar.gz" HEAD
+          useradd -m builder && chown -R builder .
+      - name: makepkg + namcap
+        # namcap stays advisory: it reports packaging opinions, not build failures.
+        run: |
+          sudo -u builder namcap PKGBUILD || true
+          sudo -u builder makepkg -f --skipchecksums --noconfirm
+      - name: Install it and convert real audio with it
+        run: |
+          pacman -U --noconfirm ./*.pkg.tar.zst
+          sh scripts/smoke.sh taffle
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ "${{ needs.prepare.outputs.is_release }}" != "true" ]; then exit 0; fi
+          gh release upload "v$VERSION" PKGBUILD --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload "v$VERSION" ./*.pkg.tar.zst --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: arch
+          path: |
+            PKGBUILD
+            *.pkg.tar.zst
+
+  # macOS gets a tarball rather than a package: there is no system package manager
+  # to install into, so the binary has to be self-contained and carry its libopus.
+  macos:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, arch: aarch64 }
+          - { os: macos-15-intel, arch: x86_64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - run: rustup show
+      - name: Install libopus
+        run: |
+          brew install opus pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - name: Build
+        # LIBOPUS_STATIC folds Homebrew's libopus.a into the binary. Without it the
+        # tarball would only run on a machine that happens to have Homebrew's opus
+        # installed at the same prefix.
+        env:
+          LIBOPUS_STATIC: "1"
+        run: cargo build --release --locked -p taffle-cli
+      - name: The binary carries its libopus rather than expecting one
+        run: |
+          otool -L target/release/taffle
+          if otool -L target/release/taffle | grep -qi opus; then
+            echo "::error::the binary still links libopus dynamically"
+            exit 1
+          fi
+      - name: Stage
+        run: |
+          mkdir -p stage
+          cp target/release/taffle stage/taffle
+          cp LICENSE README.md stage/
+      - name: Convert real audio with the staged binary
+        run: sh scripts/smoke.sh ./stage/taffle
+      - name: Tar
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: tar -czf "taffle-$VERSION-${{ matrix.arch }}-macos.tar.gz" -C stage .
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ "${{ needs.prepare.outputs.is_release }}" != "true" ]; then exit 0; fi
+          gh release upload "v$VERSION" "taffle-$VERSION-${{ matrix.arch }}-macos.tar.gz" --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "macos-${{ matrix.arch }}", path: "taffle-*-macos.tar.gz" }
+
+  # Windows: one build feeds both the portable zip and the installer.
+  windows:
+    needs: prepare
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      # No pkg-config on Windows, so audiopus_sys builds its vendored libopus with
+      # CMake. That copy declares `cmake_minimum_required(VERSION 3.1)`, which
+      # CMake 4 refuses outright.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - run: rustup show
+      - run: cargo build --release --locked -p taffle-cli
+      - name: Stage
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp target/release/taffle.exe stage/taffle.exe
+          cp LICENSE README.md stage/
+      - name: The binary is self-contained
+        shell: bash
+        # crt-static (.cargo/config.toml) folds the MSVC runtime into the .exe.
+        # Prove it held: a dynamically-linked binary names VCRUNTIME140.dll in its
+        # PE import table (plain ASCII in the file) — the exact DLL a clean Windows
+        # install lacks. This runner has the VC++ redistributable installed, so
+        # launching the binary here would succeed even after a regression;
+        # scanning the imports is what catches it.
+        run: |
+          if grep -aiq 'VCRUNTIME140' stage/taffle.exe; then
+            echo "::error::taffle.exe still dynamically links the MSVC runtime (VCRUNTIME140.dll)"
+            exit 1
+          fi
+          echo "stage/taffle.exe: self-contained (no VCRUNTIME140 import)"
+      - name: Convert real audio with the staged binary
+        shell: bash
+        run: sh scripts/smoke.sh ./stage/taffle.exe
+      - name: Zip
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: cd stage && 7z a "../taffle-$VERSION-x86_64-windows.zip" .
+      - name: Build installer
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Pinned like every other toolchain in this workflow: this compiler builds
+          # an artifact that runs elevated on a user's machine, so an unpinned bump
+          # must not land unreviewed.
+          choco install nsis --version=3.12.0 -y
+          # -NOCD: makensis otherwise cd's to the script's directory, so the
+          # relative File "stage\..." paths would resolve under packaging/windows.
+          "/c/Program Files (x86)/NSIS/makensis.exe" -NOCD -DVERSION="$VERSION" packaging/windows/installer.nsi
+      - name: Install with the installer and prove it did what it claims
+        shell: pwsh
+        # A quoting mistake in the installer script yields an installer that builds
+        # and runs cleanly while its PATH edit does nothing at all, so the only way
+        # to know the edit works is to perform it and read the machine PATH back.
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          Start-Process -Wait "taffle-$env:VERSION-x86_64-setup.exe" -ArgumentList "/S"
+          $p = [Environment]::GetEnvironmentVariable('Path','Machine')
+          if ($p -notlike "*taffle*") { throw "the installer did not put taffle on the machine PATH" }
+          & "$env:ProgramFiles\taffle\taffle.exe" --version
+      - name: Upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ "${{ needs.prepare.outputs.is_release }}" != "true" ]; then exit 0; fi
+          gh release upload "v$VERSION" \
+            "taffle-$VERSION-x86_64-windows.zip" \
+            "taffle-$VERSION-x86_64-setup.exe" --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: windows, path: "taffle-*-x86_64-*" }
+
+  checksums:
+    if: needs.prepare.outputs.is_release == 'true'
+    needs: [prepare, deb, arch, macos, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Hashing what the release actually holds, rather than what each build job
+      # believed it uploaded, is what makes this file describe the release.
+      - name: Download every release asset and hash it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir dl && cd dl
+          gh release download "v$VERSION" --repo "${GITHUB_REPOSITORY}"
+          # SHA256SUMS is itself an asset of the release it describes, so a re-run of
+          # this job downloads the previous one alongside the packages. Remove it before
+          # hashing, or it ends up in its own successor with a hash of its old contents.
+          rm -f SHA256SUMS
+          sha256sum -- * > SHA256SUMS
+          gh release upload "v$VERSION" SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
+
+  publish:
+    if: needs.prepare.outputs.is_release == 'true'
+    needs: [prepare, checksums]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Un-draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: gh release edit "v$VERSION" --draft=false --repo "${GITHUB_REPOSITORY}"

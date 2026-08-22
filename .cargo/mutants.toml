@@ -1,0 +1,16 @@
+# The mutants no test can ever kill, each one named on its own.
+#
+# CI gates that every mutant of the code a branch changes dies, so a mutant that is either the same
+# code it replaces or one that hangs the caller instead of failing an assertion would hold every
+# branch red forever. Each pattern below pins one file, one function and one exact mutation: any
+# other mutant of the same function is still tested, and still has to die.
+exclude_re = [
+    # The body of `metadata` already is `SourceMetadata::default()` — the mutant is the same code.
+    'produce\.rs:.*replace <impl AudioSource for Concat>::metadata -> SourceMetadata with Default::default\(\)',
+    # `> 1` and `>= 1` differ only at one input, where both arms give the same one stream back.
+    'produce\.rs:.*replace > with >= in streamed',
+    # An endless supply of empty blocks: the conversion never ends, so no assertion is ever reached.
+    'produce\.rs:.*replace <impl AudioSource for Concat>::next_block -> Result<Option<Vec<i16>>, DecodeError> with Ok\(Some\(vec!\[\]\)\)',
+    # A turn that resamples nothing never drains the pending frames the push loop waits on.
+    'pcm/resample\.rs:.*replace Resampler48::turn -> Result<\(\), PcmError> with Ok\(\(\)\)',
+]

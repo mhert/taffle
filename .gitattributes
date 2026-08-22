@@ -1,0 +1,17 @@
+# Normalize all text to LF on checkout, so a Windows checkout builds and tests
+# from the same bytes every other platform does.
+* text=auto eol=lf
+
+# Never touch binary fixtures — an audio file, a video container, or a raw
+# TAF header is not text.
+*.m4b binary
+*.mp3 binary
+*.wav binary
+*.taf binary
+*.jpg binary
+*.png binary
+*.ogg binary
+*.flac binary
+*.mp4 binary
+*.opus binary
+*.bin binary

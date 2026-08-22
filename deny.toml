@@ -4,9 +4,11 @@ ignore = [
     # The sys crate the `opus` bindings link libopus through. The advisory reports no
     # vulnerability: it says the crate is unmaintained, that no upgrade exists, and that the
     # vendored libopus it falls back to building does not build under CMake 4. That fallback is
-    # not the path taken here — every build links the system libopus that pkg-config finds, which
-    # is what CI installs — so what is left is a binding to a stable C API that nobody is changing.
-    { id = "RUSTSEC-2026-0150", reason = "audiopus_sys is unmaintained with no upgrade available; the vendored CMake build it warns about is never used, as libopus is linked from the system" },
+    # the path taken on Windows, which has no pkg-config for the probe to find anything with —
+    # `CMAKE_POLICY_VERSION_MINIMUM=3.5` in CI is what makes that vendored build succeed there.
+    # Linux and macOS still link the system libopus that pkg-config finds. What is left, either
+    # way, is a binding to a stable C API that nobody is changing.
+    { id = "RUSTSEC-2026-0150", reason = "audiopus_sys is unmaintained with no upgrade available; on Windows its vendored CMake build is the path taken, made to work with CMAKE_POLICY_VERSION_MINIMUM=3.5; Linux and macOS still link the system libopus" },
 ]
 
 [licenses]

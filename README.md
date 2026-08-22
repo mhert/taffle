@@ -13,12 +13,49 @@ wrote book.jpg
 
 ## Install
 
+Every release carries a package for each platform, on the
+[releases page](https://github.com/mhert/taffle/releases). `SHA256SUMS` beside them
+covers every file in the release; download it next to whatever you took and check
+what arrived before installing it:
+
 ```sh
-cargo install taffle-cli
+sha256sum --ignore-missing -c SHA256SUMS
+# macOS ships no sha256sum: shasum -a 256 --ignore-missing -c SHA256SUMS
 ```
 
-The crate is named `taffle-cli`; the binary it installs is called `taffle`. From a
-clone — which is where it lives until the crates are published:
+**Debian and Ubuntu** — one `.deb` per distro, each linking that distro's own libopus:
+
+```sh
+sudo apt install ./taffle_<version>_amd64_debian13.deb
+```
+
+**Arch** — the built package, or the `PKGBUILD` beside it to build your own:
+
+```sh
+sudo pacman -U taffle-<version>-1-x86_64.pkg.tar.zst
+```
+
+**macOS** — a tarball for each architecture, carrying its own libopus, so nothing
+needs installing alongside it. The archive also carries the license and readme next
+to the binary, so unpack it into a directory of its own rather than the current one:
+
+```sh
+mkdir -p taffle && tar -xzf taffle-<version>-aarch64-macos.tar.gz -C taffle
+sudo mv taffle/taffle /usr/local/bin/
+```
+
+That leaves `taffle/` holding the license and the readme, to keep or delete as you
+like. The binaries are unsigned, so Gatekeeper will hold one back on first run:
+`sudo xattr -c /usr/local/bin/taffle` clears it.
+
+**Windows** — `taffle-<version>-x86_64-setup.exe` installs the binary and puts it on
+PATH; `taffle-<version>-x86_64-windows.zip` is the same binary to unpack wherever you
+like. The installer is unsigned, so SmartScreen will warn on first run.
+
+### From source
+
+From a clone of this repository, this builds the binary and puts it in
+`~/.cargo/bin`:
 
 ```sh
 cargo install --path crates/taffle-cli
@@ -28,7 +65,7 @@ Building needs a C toolchain and **libopus** — `libopus-dev` on Debian and Ubu
 `opus` on Homebrew, `opus-dev` on Alpine. The Opus bindings look the library up with
 `pkg-config` and fall back to building their own vendored copy with CMake, which is
 slower and wants a CMake older than 4; installing the system library is the shorter
-road. Nothing is needed at runtime.
+road. Nothing is needed at runtime — a released binary carries what it needs.
 
 ## Usage
 

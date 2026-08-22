@@ -1,6 +1,6 @@
 [package]
 name = "taf"
-version = "0.1.0"
+version.workspace = true
 description = "The Tonie Audio Format: header codec, Ogg framing and packet padding, no_std and dependency-free"
 keywords = ["taf", "toniebox", "teddycloud", "ogg", "opus"]
 categories = ["encoding", "multimedia::encoding", "parser-implementations", "no-std"]

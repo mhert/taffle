@@ -1,6 +1,7 @@
 [package]
 name = "taffle-cli"
-version = "0.1.0"
+version.workspace = true
+description = "Convert audiobooks and music into Tonie Audio Format (TAF) files for teddycloud-backed Tonieboxes"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -26,3 +27,25 @@ tempfile = { workspace = true }
 
 [lints]
 workspace = true
+
+# The binary is named `taffle`, so the package is too — `taffle-cli` is a crate
+# name and would mean nothing to somebody running `apt install`.
+#
+# `depends` is left at cargo-deb's `$auto`, which resolves it with dpkg-shlibdeps
+# against the binary in the distro the package was built in. That is why the two
+# debs are built inside their own distro containers rather than sharing a build:
+# each resolves the libopus package name its own distro uses.
+[package.metadata.deb]
+name = "taffle"
+maintainer = "mhert <mathias@mh.cx>"
+# Without this, cargo-deb writes a /usr/share/doc/taffle/copyright that names no
+# license text at all, and Debian Policy asks every package to carry a verbatim
+# copy of its license. The path is relative to this crate, so it climbs to the
+# workspace root; nothing is skipped because the file is license text from its
+# very first line.
+license-file = ["../../LICENSE", "0"]
+section = "sound"
+priority = "optional"
+assets = [
+    ["target/release/taffle", "usr/bin/taffle", "755"],
+]

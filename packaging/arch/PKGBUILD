@@ -1,0 +1,33 @@
+# Maintainer: mhert <mathias@mh.cx>
+pkgname=taffle
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Convert audiobooks and music into Tonie Audio Format (TAF) files"
+arch=('x86_64')
+url="https://github.com/mhert/taffle"
+license=('MIT')
+depends=('opus')
+makedepends=('rust')
+
+# !debug overrides a makepkg default. With `debug` on, makepkg builds with
+# -C debuginfo=2 and (together with `strip`) splits the debug symbols into a
+# separate taffle-debug package. That companion is for maintainers, not end
+# users of a release, so we don't produce it — the main package is still
+# stripped.
+options=(!debug)
+
+source=("$pkgname-$pkgver.tar.gz::https://github.com/mhert/taffle/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  cargo build --release --locked -p taffle-cli
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  install -Dm755 target/release/taffle "$pkgdir/usr/bin/taffle"
+  # MIT is not one of the licenses /usr/share/licenses/common covers, so the
+  # package has to carry its own copy.
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

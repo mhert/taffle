@@ -1,36 +1,85 @@
 name: CI
+
 on:
-  push: { branches: [main] }
+  push:
+    branches: [main]
   pull_request:
+
+# Least privilege: every job only reads the repository.
+permissions:
+  contents: read
+
+# A new push to the same ref supersedes any run already in flight for it,
+# so the stale run is cancelled instead of racing the new one to completion.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  lint:
-    runs-on: ubuntu-latest
+  fmt:
+    name: fmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: "rustfmt, clippy" }
-      # taf-encode decodes Opus through libopus. Without the system library, its bindings fall
-      # back to building a vendored copy, which takes minutes and needs a CMake older than 4.
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
       - run: cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # taf-encode decodes Opus through libopus. Without the system library, its
+      # bindings fall back to building a vendored copy, which takes minutes and
+      # wants a CMake older than 4.
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The pinned version is what stops a compromised release of the tool itself
+      # landing here — cargo-deny is the gate that would catch a poisoned
+      # dependency tree, so its own provenance matters most of all. Installed as a
+      # prebuilt binary rather than compiled from source, which keeps this job
+      # inside its timeout.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny check
+
   test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
-      # One platform's failure is worth knowing about while the other is still being found out.
+      # One platform's failure is worth knowing about while the other is still
+      # being found out.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2025]
+    env:
+      # audiopus_sys builds its vendored libopus with CMake where pkg-config
+      # finds nothing, which is every Windows build. That copy declares
+      # `cmake_minimum_required(VERSION 3.1)`, which CMake 4 refuses outright.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libopus-dev
-      # `audiopus_sys` probes pkg-config first and only builds its vendored copy when that comes up
-      # empty — a CMake build whose `cmake_minimum_required(VERSION 3.1)` CMake 4 refuses outright.
-      # So the library is installed and the probe is left to succeed. On macOS the probe asks for a
-      # static libopus, which is what Homebrew's formula builds. `LIBOPUS_LIB_DIR` is the lever if
+      # `audiopus_sys` probes pkg-config first and only builds its vendored copy
+      # when that comes up empty. So the library is installed and the probe is
+      # left to succeed. On macOS the probe asks for a static libopus, which is
+      # what Homebrew's formula builds. `LIBOPUS_LIB_DIR` is the lever if
       # pkg-config ever misses it.
       - if: runner.os == 'macOS'
         run: |
@@ -38,28 +87,51 @@ jobs:
           echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
       - run: cargo test --workspace --all-features
   no-std:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: riscv32imc-unknown-none-elf }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build -p taf --no-default-features --target riscv32imc-unknown-none-elf
       - run: cargo build -p taf --no-default-features --features alloc --target riscv32imc-unknown-none-elf
+  versioning:
+    name: versioning (bump script + drift guard)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # The version must be identical in the manifest and the one packaging file
+      # that carries it committed (Windows and Debian take theirs from the build
+      # command). This catches a hand-edit that bumps one but forgets the other.
+      - name: packaging and manifest versions agree
+        run: |
+          manifest="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          pkgbuild="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)"
+          if [ "$manifest" != "$pkgbuild" ]; then
+            echo "::error::PKGBUILD pkgver ($pkgbuild) != Cargo.toml version ($manifest)"
+            exit 1
+          fi
+          echo "version consistent: $manifest"
+      - name: bump-version.sh tests
+        run: sh scripts/bump-version.test.sh
   coverage:
     # Coverage is a gate on what a change touched rather than on the tree it landed in, so it needs
     # something to compare against: the merge base of the pull request. A push carries no such base,
     # and the pull request that brought it has already been measured.
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: llvm-tools-preview }
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libopus-dev
       - uses: taiki-e/install-action@v2
-        with: { tool: cargo-llvm-cov }
+        with: { tool: cargo-llvm-cov@0.8.7 }
       - name: The commit this branch is measured against
         env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
         # A branch that shares no history with its base has no merge base — which is what the first
@@ -143,7 +215,7 @@ jobs:
   mutants:
     # Same base, same reason as the coverage job.
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A shard of an ordinary pull request is a handful of mutants and takes minutes. A shard of the
     # first one — whose diff creates every file in the tree, and with it all 1107 mutants the
     # workspace holds — is around 90 of them, which is where the hour comes from. The bound is
@@ -155,12 +227,13 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libopus-dev
       - uses: taiki-e/install-action@v2
-        with: { tool: cargo-mutants }
+        with: { tool: cargo-mutants@27.1.0 }
       - name: The commit this branch is measured against
         env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
         # Same stand-in as the coverage job's, for the same branch that shares no history with what

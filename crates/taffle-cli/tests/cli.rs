@@ -694,3 +694,16 @@ fn the_files_that_were_not_tafs_are_counted_in_what_the_run_comes_to() {
         .code(1)
         .stderr(contains("2 files are not the TAFs their headers describe"));
 }
+
+#[test]
+fn the_crate_says_what_it_converts_to_where_a_package_can_read_it() {
+    // What a .deb, a PKGBUILD or a crates.io page shows about taffle is the manifest
+    // description, and cargo-deb refuses to build a package for a crate without one.
+    // `taffle --help` cannot stand in for this: clap takes its summary line from the
+    // doc comment on the argument struct, so the help reads the same either way.
+    let description = env!("CARGO_PKG_DESCRIPTION");
+    assert!(
+        description.contains("Tonie Audio Format"),
+        "the crate description does not say what taffle converts to: {description:?}"
+    );
+}
