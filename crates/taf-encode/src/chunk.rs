@@ -35,10 +35,18 @@
 //! whatever order the workers happen to finish in. A conversion's bytes are the grid's, and the
 //! grid is the audio's.
 
-// Cutting is decided here and the encoding of a chunk happens elsewhere, so nothing outside this
-// module's own tests reaches for one yet. The allow comes off with the encoding side that takes
-// them.
-#![allow(dead_code)]
+// Only outside a test build: the module's own tests reach for every item here, so there is nothing
+// to expect there.
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Cutting is decided here and the encoding of a chunk happens elsewhere, so \
+                  nothing outside this module's own tests reaches for one yet. Expecting rather \
+                  than allowing means this stops compiling — and so comes off — the moment the \
+                  encoding side takes jobs."
+    )
+)]
 
 use crate::encode::FRAME_SAMPLES;
 
@@ -274,7 +282,9 @@ mod tests {
             vec![0; FRAME_SAMPLES - 4].as_slice()
         );
         assert!(cut.chapters.is_empty());
+        // The chapter at the very end brings no audio of its own, not even a silent packet.
         assert_eq!(last.chapters, [Some(String::from("Two"))]);
+        assert!(last.pcm.is_empty());
     }
 
     #[test]
@@ -317,6 +327,24 @@ mod tests {
         // One padded packet existed in front, so one padded packet is the whole warm-up.
         assert_eq!(cut.pcm.len(), FRAME_SAMPLES);
         assert_eq!(last.warmup.len(), FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn a_warmup_reaches_back_across_several_chunks_too_short_to_fill_one() {
+        let mut chunker = Chunker::new();
+
+        // A chapter every packet: no chunk on its own carries a whole warm-up.
+        for level in [1_000, 2_000, 3_000] {
+            assert!(chunker.push_block(level_packets(1, level)).is_none());
+            assert!(chunker.begin_chapter(None).is_some());
+        }
+        let last = chunker.finish().unwrap();
+
+        // So the warm-up is the three of them in a row, oldest packet first.
+        assert_eq!(last.warmup.len(), 3 * FRAME_SAMPLES);
+        assert_eq!(last.warmup[0], 1_000);
+        assert_eq!(last.warmup[FRAME_SAMPLES], 2_000);
+        assert_eq!(last.warmup[2 * FRAME_SAMPLES], 3_000);
     }
 
     #[test]
