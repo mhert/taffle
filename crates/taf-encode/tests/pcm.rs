@@ -434,17 +434,23 @@ fn a_full_scale_signal_is_clamped_where_the_filter_overshoots_it() {
 fn an_impulse_lands_where_the_resampling_counts_it() {
     // Where the resampling puts a sample is what keeps a chapter mark on the audio it marked, and
     // an impulse is the one signal whose place in a stream is a single frame. It is also where the
-    // filter's own delay would show: rubato's sinc resampler has already taken that out, and taking
-    // it out a second time — which rubato's own procedure for a clip describes — would move the
-    // whole stream 139 frames early at 44 100 Hz.
+    // filter's own delay shows: the resampler hands its output back delayed by the filter, the
+    // stage drops exactly that many frames off the front, and one frame too few or too many there
+    // moves the whole stream.
     //
-    // The frame it lands on is the source frame *behind* it scaled, one frame back: the resampler
-    // counts an output frame from the input it has read past, and the difference that makes is
-    // under a fifth of a millisecond anywhere in the band. Everything below is within a frame of
-    // it, at rates from one edge of that band to the other.
+    // The frame it lands on is the frame `scale_samples` puts the source frame on, exactly, at
+    // rates from one edge of the band to the other.
     const AT: usize = 5_000;
 
-    for rate in [4_800, 8_000, 22_050, fixtures::SAMPLE_RATE, 88_200, 480_000] {
+    for rate in [
+        4_800,
+        8_000,
+        22_050,
+        fixtures::SAMPLE_RATE,
+        44_101,
+        88_200,
+        480_000,
+    ] {
         let mut samples = vec![0; AT * usize::from(CHANNELS)];
         samples.extend([20_000, 20_000]);
         samples.resize(3 * AT * usize::from(CHANNELS), 0);
@@ -461,17 +467,11 @@ fn an_impulse_lands_where_the_resampling_counts_it() {
                 .0,
         )
         .unwrap();
-        let counted = pcm.scale_samples(u64::try_from(AT).unwrap() + 1) - 1;
-        assert!(
-            loudest.abs_diff(counted) <= 1,
-            "the impulse of a source at {rate} Hz landed at frame {loudest}, not within a frame \
-             of {counted}"
+        let counted = pcm.scale_samples(u64::try_from(AT).unwrap());
+        assert_eq!(
+            loudest, counted,
+            "the impulse of a source at {rate} Hz landed at frame {loudest}, not on {counted}"
         );
-        if rate == fixtures::SAMPLE_RATE {
-            // At the rate an audiobook is authored at, that is the frame `scale_samples` puts the
-            // impulse itself on, with nothing left to round.
-            assert_eq!(loudest, pcm.scale_samples(u64::try_from(AT).unwrap()));
-        }
     }
 }
 
@@ -499,6 +499,27 @@ fn a_source_that_ends_on_a_chunk_boundary_still_comes_out_whole() {
         peak_of(last, 0) > 10_000,
         "the stream trails off into silence"
     );
+}
+
+#[test]
+fn a_source_shorter_than_the_filter_reaches_still_comes_out_whole() {
+    // The filter works in segments of source frames and gives nothing back until it holds a whole
+    // one, and how long a segment is depends on the rate: where the ratio to 48 kHz does not
+    // reduce at all, it is a second of source frames. A source of a handful of frames is far short
+    // of that, so the stream is only whole if the end of it is flushed until the length is
+    // reached — however many turns of zeros the filter takes before it hands anything back.
+    for frames in [1_u32, 5, 40, 1_000] {
+        let samples = tone(frames, 44_101, CHANNELS, 15_000);
+        let mut pcm = Pcm48::new(Blocks::of(spec(44_101, CHANNELS), &samples, 4_096)).unwrap();
+
+        let stream = stream_of(&mut pcm);
+
+        assert_eq!(
+            frames_in(&stream),
+            pcm.scale_samples(u64::from(frames)),
+            "a source of {frames} frames came out at another length"
+        );
+    }
 }
 
 #[test]
