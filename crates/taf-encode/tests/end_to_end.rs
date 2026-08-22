@@ -846,6 +846,31 @@ fn a_conversion_that_came_out_with_no_audio_is_still_a_file_of_one_chapter() {
 }
 
 #[test]
+fn the_file_does_not_depend_on_how_many_encoders_ran() {
+    use std::num::NonZeroUsize;
+
+    // Long enough for several chunks, several files so chapters cut the grid too.
+    let book = || {
+        vec![
+            input(tone_wav(u64::from(fixtures::FRAMES) * 20), "one.wav"),
+            input(tone_wav(u64::from(fixtures::FRAMES) * 20), "two.wav"),
+        ]
+    };
+    let with = |workers| Conversion {
+        chapter_mode: ChapterMode::Auto,
+        silence: SilenceOpts::default(),
+        workers,
+    };
+
+    let (alone, _, first) = run(book(), &with(NonZeroUsize::new(1)));
+    let (crowd, _, second) = run(book(), &with(NonZeroUsize::new(4)));
+
+    first.expect("one worker converts");
+    second.expect("four workers convert");
+    assert_eq!(alone, crowd, "the file is the audio's, not the machine's");
+}
+
+#[test]
 fn an_input_that_does_not_decode_names_itself() {
     let (_, _, report) = run(
         vec![

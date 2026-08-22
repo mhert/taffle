@@ -35,19 +35,6 @@
 //! whatever order the workers happen to finish in. A conversion's bytes are the grid's, and the
 //! grid is the audio's.
 
-// Only outside a test build: the module's own tests reach for every item here, so there is nothing
-// to expect there.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Cutting is decided here and the encoding of a chunk happens elsewhere, so \
-                  nothing outside this module's own tests reaches for one yet. Expecting rather \
-                  than allowing means this stops compiling — and so comes off — the moment the \
-                  encoding side takes jobs."
-    )
-)]
-
 use crate::encode::FRAME_SAMPLES;
 
 /// How many packets a chunk aims for: ~20 s, long enough that a warm-up is a rounding error.

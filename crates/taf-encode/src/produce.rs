@@ -22,9 +22,12 @@ use std::sync::mpsc::SyncSender;
 use std::vec::IntoIter;
 
 use crate::chapters::ChapterMode;
-use crate::convert::{Conversion, ConvertError, Input, CHANNELS, RATE};
+use crate::convert::{Conversion, ConvertError, Input, RATE};
 use crate::decode::{open_source, AudioSource, Cover, DecodeError, SourceMetadata, SourceSpec};
 use crate::pcm::{Pcm48, PcmError, SilenceOpts, SilenceProcessor};
+
+/// The channels every block handed over here interleaves.
+const CHANNELS: u16 = 2;
 
 /// What the reading hands the encoding, in the order the encoding takes it.
 pub(crate) enum Feed {

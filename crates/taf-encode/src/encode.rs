@@ -27,8 +27,8 @@
 //! Samples become packets in one place and packets become a file in another: [`encode_job`] takes a
 //! chunk of audio and hands its packets back, and [`PacketSink`] takes packets and writes the file
 //! they make. Nothing passes between them but the packets, so the two ends need not run in the same
-//! place or at the same time. [`TafEncoder`] is both halves in one piece, for a caller that has the
-//! audio as a stream and wants a file at the end of it.
+//! place or at the same time — which is what lets a conversion encode its chunks on every core it
+//! has and write them out on one.
 //!
 //! # Counting the bytes the writer writes
 //!
@@ -148,13 +148,6 @@ fn configured() -> Result<Encoder, opus::Error> {
 /// # Errors
 ///
 /// [`opus::Error`] if libopus refuses the settings or a frame.
-// Only outside a test build: a conversion still encodes its audio through `TafEncoder`, so nothing
-// but this module's own tests hands a job over yet. Expecting rather than allowing means this stops
-// compiling — and so comes off — the moment one does.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no conversion hands jobs over yet")
-)]
 pub(crate) fn encode_job(job: &Job) -> Result<Vec<Vec<u8>>, opus::Error> {
     let mut encoder = configured()?;
     let mut packet = vec![0_u8; MAX_PACKET];
@@ -178,10 +171,10 @@ pub(crate) fn encode_job(job: &Job) -> Result<Vec<Vec<u8>>, opus::Error> {
 
 /// A TAF being written out of packets that were encoded somewhere else.
 ///
-/// This is the writer half of [`TafEncoder`] on its own: packets go in whole, in the order the file
-/// carries them, and the same counting says where a chapter's block falls. A file whose audio came
-/// to nothing is the caller's business here, since making the one packet of silence such a file
-/// needs takes an encoder and there is none behind this.
+/// Packets go in whole, in the order the file carries them, and the bytes on their way past say
+/// where a chapter's block falls. A file whose audio came to nothing is the caller's business here,
+/// since making the one packet of silence such a file needs takes an encoder and there is none
+/// behind this.
 pub(crate) struct PacketSink<W: Write + Seek> {
     writer: StdTafWriter<Digest, Counted<W>>,
     /// The frames of one channel written so far, which is where the audio of the next chapter
@@ -191,12 +184,6 @@ pub(crate) struct PacketSink<W: Write + Seek> {
     written: Rc<Cell<u64>>,
 }
 
-// Only outside a test build, for the same reason `encode_job` carries it: a conversion still writes
-// through `TafEncoder`, so nothing but this module's own tests opens a sink yet.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no conversion writes through a sink yet")
-)]
 impl<W: Write + Seek> PacketSink<W> {
     /// Opens a file of `audio_id` in `out`.
     ///
@@ -269,150 +256,6 @@ impl<W: Write + Seek> PacketSink<W> {
         writer.finalize()?;
 
         Ok(frames)
-    }
-}
-
-/// A TAF being written out of 48 kHz stereo samples: the Opus encoder, and `taf`'s writer behind
-/// it.
-///
-/// [`push`](Self::push) takes the samples as they come and encodes every whole frame they complete,
-/// [`begin_chapter`](Self::begin_chapter) starts a chapter at the next block, and
-/// [`finish`](Self::finish) writes what is left and closes the file.
-pub(crate) struct TafEncoder<W: Write + Seek> {
-    encoder: Encoder,
-    writer: StdTafWriter<Digest, Counted<W>>,
-    /// The samples of the frame being filled, interleaved and fewer than a whole frame's.
-    pending: Vec<i16>,
-    /// The packet in flight, reused frame after frame: libopus writes into it and the writer reads
-    /// out of it.
-    packet: Vec<u8>,
-    /// The frames of one channel encoded so far, the silence a frame was filled out with counted
-    /// in — which is where the audio of the next chapter begins.
-    frames: u64,
-    /// The bytes written to the file so far, which is what the chapter blocks are counted from.
-    written: Rc<Cell<u64>>,
-}
-
-impl<W: Write + Seek> TafEncoder<W> {
-    /// Opens a file of `audio_id` in `out`, and an encoder at the settings a TAF states.
-    ///
-    /// # Errors
-    ///
-    /// [`ConvertError::Encode`] if libopus refuses the settings, and [`ConvertError::Io`] or
-    /// [`ConvertError::Taf`] if the file could not be opened the way a TAF opens.
-    pub(crate) fn new(audio_id: AudioId, out: W) -> Result<Self, ConvertError> {
-        let encoder = configured()?;
-
-        let written = Rc::new(Cell::new(0));
-        let digest = Digest(<sha1::Sha1 as sha1::Digest>::new());
-        let file = Counted {
-            out,
-            written: Rc::clone(&written),
-        };
-        let writer = write_taf(digest, audio_id, Tags::new(VENDOR, &[COMMENT]), file)?;
-
-        Ok(Self {
-            encoder,
-            writer,
-            pending: Vec::with_capacity(FRAME_SAMPLES),
-            packet: vec![0; MAX_PACKET],
-            frames: 0,
-            written,
-        })
-    }
-
-    /// Encodes every whole 60 ms frame that `block` completes, and keeps what is left of one.
-    ///
-    /// # Errors
-    ///
-    /// [`ConvertError::Encode`] if libopus refuses a frame, and [`ConvertError::Io`] or
-    /// [`ConvertError::Taf`] if a page could not be written.
-    pub(crate) fn push(&mut self, block: &[i16]) -> Result<(), ConvertError> {
-        let mut rest = block;
-
-        // The frame in hand is encoded the moment it is full, so there is room for a sample at the
-        // top of every turn and every turn takes at least one.
-        while !rest.is_empty() {
-            let room = FRAME_SAMPLES.saturating_sub(self.pending.len());
-            let (taken, left) = rest.split_at_checked(room).unwrap_or((rest, &[]));
-            self.pending.extend_from_slice(taken);
-            rest = left;
-
-            if self.pending.len() >= FRAME_SAMPLES {
-                self.encode_frame()?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Starts a chapter at the block behind the audio pushed so far.
-    ///
-    /// What is left of the frame in hand is filled out with silence and encoded first, so the
-    /// chapter's own audio begins a packet — and a page, and a block — of its own.
-    ///
-    /// # Errors
-    ///
-    /// [`ConvertError::Encode`] if libopus refuses that frame, and [`ConvertError::Io`] or
-    /// [`ConvertError::Taf`] if the page it closes could not be written.
-    pub(crate) fn begin_chapter(&mut self) -> Result<(), ConvertError> {
-        if !self.pending.is_empty() {
-            self.encode_frame()?;
-        }
-        self.writer.begin_chapter()?;
-
-        Ok(())
-    }
-
-    /// The block the audio behind the last chapter begun starts at.
-    pub(crate) fn block(&self) -> BlockIndex {
-        // A file opens with the header block, which is not part of the audio region the chapter
-        // blocks are counted in.
-        let audio = self.written.get().saturating_sub(BLOCK);
-
-        BlockIndex::new(u32::try_from(audio / BLOCK).unwrap_or(u32::MAX))
-    }
-
-    /// The frames of one channel the file carries so far, the silence frames were filled out with
-    /// counted in.
-    pub(crate) fn frames(&self) -> u64 {
-        self.frames
-    }
-
-    /// Writes what is left, finishes the file, and states how many frames it came to.
-    ///
-    /// # Errors
-    ///
-    /// [`ConvertError::Encode`] if libopus refuses the last frame, and [`ConvertError::Io`] or
-    /// [`ConvertError::Taf`] if the last pages or the header block could not be written.
-    pub(crate) fn finish(mut self) -> Result<u64, ConvertError> {
-        // A TAF's first block holds the two Opus header pages and an audio page, so every file has
-        // a packet in it: a conversion that came out with no audio at all is the one 60 ms frame of
-        // silence that makes what was written a file.
-        if !self.pending.is_empty() || self.frames == 0 {
-            self.encode_frame()?;
-        }
-
-        let Self { writer, frames, .. } = self;
-        writer.finalize()?;
-
-        Ok(frames)
-    }
-
-    /// Encodes the frame in hand, filled out with silence where it is short of a whole one, and
-    /// puts the packet in the file.
-    fn encode_frame(&mut self) -> Result<(), ConvertError> {
-        self.pending.resize(FRAME_SAMPLES, 0);
-        let len = self.encoder.encode(&self.pending, &mut self.packet)?;
-        // The length libopus states is at most the buffer it was handed, so this never comes up
-        // empty for a packet that was written.
-        let packet = self.packet.get(..len).unwrap_or_default();
-        self.writer.add_packet(packet, FRAME)?;
-
-        self.pending.clear();
-        self.frames = self.frames.saturating_add(u64::from(FRAME));
-
-        Ok(())
     }
 }
 

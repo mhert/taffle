@@ -106,7 +106,7 @@ jobs:
 
           # The arm of `From<WriterIoError> for ConvertError` that stands for a writer error the
           # writer cannot yet return.
-          printf '%s\n' "$PWD/crates/taf-encode/src/convert.rs:368" > allowed.txt
+          printf '%s\n' "$PWD/crates/taf-encode/src/convert.rs:397" > allowed.txt
 
           # A `break` that ends a walk which does not advance. Nothing can reach it while `atom_at`
           # refuses an atom shorter than its own header — the test
@@ -126,7 +126,7 @@ jobs:
           # to be readable to be one at all.
           seq 524 526 | sed "s|^|$PWD/crates/taf-encode/src/decode/mp4_chapters.rs:|" >> allowed.txt
 
-          # Whole-line matches, so that an exemption for line 368 is not also one for line 36.
+          # Whole-line matches, so that an exemption for line 397 is not also one for line 39.
           comm -12 changed-lines.txt uncovered-lines.txt > uncovered-changed.txt
           grep -xF -f allowed.txt uncovered-changed.txt > allowed-gaps.txt || true
           grep -vxF -f allowed.txt uncovered-changed.txt > gaps.txt || true
