@@ -43,9 +43,10 @@ pub(crate) const TARGET_PACKETS: usize = 333;
 /// How far a cut may move to land on a pause: ~2 s either way.
 pub(crate) const SNAP_PACKETS: usize = 33;
 
-/// How many packets warm a fresh encoder up: the shortest warm-up the convergence test in
-/// `encode.rs` cannot tell apart from a far longer one, since by then the state a fresh encoder
-/// starts from has leaked back out of it.
+/// How many packets warm a fresh encoder up: at 8 packets the bytes still move when the warm-up
+/// grows, at 12 they no longer do and a far longer warm-up leaves them identical — by then the
+/// state a fresh encoder starts from has leaked back out of it. The convergence test in
+/// `encode.rs` holds that upper end of the measurement.
 pub(crate) const WARMUP_PACKETS: usize = 12;
 
 /// One chunk of the conversion, as the encoding side is handed it.
