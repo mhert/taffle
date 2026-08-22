@@ -43,10 +43,12 @@ pub(crate) const TARGET_PACKETS: usize = 333;
 /// How far a cut may move to land on a pause: ~2 s either way.
 pub(crate) const SNAP_PACKETS: usize = 33;
 
-/// How many packets warm a fresh encoder up: at 8 packets the bytes still move when the warm-up
-/// grows, at 12 they no longer do and a far longer warm-up leaves them identical — by then the
-/// state a fresh encoder starts from has leaked back out of it. The convergence test in
-/// `encode.rs` holds that upper end of the measurement.
+/// How many packets warm a fresh encoder up: against the libopus this was measured on, 8 packets
+/// still moved the bytes when the warm-up grew and 12 landed byte-identical — by then the state a
+/// fresh encoder starts from has leaked back out of it. How exactly the bytes settle is that
+/// build's own affair; what holds across libopus builds is that whatever difference a longer
+/// warm-up still makes sits far below hearing, and the convergence test in `encode.rs` pins that
+/// bound.
 pub(crate) const WARMUP_PACKETS: usize = 12;
 
 /// One chunk of the conversion, as the encoding side is handed it.
