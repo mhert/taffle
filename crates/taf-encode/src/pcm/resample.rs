@@ -179,10 +179,11 @@ impl Resampler48 {
         let frames = self.pending.get(..taken * channels).unwrap_or_default();
 
         for (channel, samples) in self.planar.iter_mut().enumerate() {
-            for (frame, sample) in samples.iter_mut().enumerate() {
-                *sample = frames
-                    .get(frame * channels + channel)
-                    .map_or(0.0, |source| from_i16(*source));
+            // Zeros first: at the end of the stream a turn is fed less than a chunk, and what the
+            // source did not fill is silence behind it.
+            samples.fill(0.0);
+            for (sample, frame) in samples.iter_mut().zip(frames.chunks_exact(channels)) {
+                *sample = frame.get(channel).map_or(0.0, |source| from_i16(*source));
             }
         }
 
