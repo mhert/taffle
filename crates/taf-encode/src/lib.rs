@@ -5,6 +5,18 @@
 //! and a finished file comes out of the other end. Everything else here is one stage of that, and
 //! public because a stage is worth having on its own.
 //!
+//! # The shape a conversion runs in
+//!
+//! The inputs are read once, in the order they were handed in, by one reader — nothing here rewinds
+//! an input or reads it a second time. What runs beside that reading is the encoding: the reader
+//! goes in front, on a thread of its own, the audio it hands over is cut into chunks that the cores
+//! encode side by side, and the file is written in order behind them.
+//!
+//! None of that is in the file. Where a chunk is cut follows from the audio and nothing else, a
+//! chunk encodes to the same packets whichever core takes it, and the packets are written in the
+//! order the chunks were cut — so the same inputs and the same options come to the same bytes on a
+//! machine of one core and on a machine of sixteen. [`convert()`] states the whole of that rule.
+//!
 //! # The crates this one's types are made of
 //!
 //! An [`Input`] holds a `symphonia` media source, [`ConvertError::Encode`] is an `opus` error and

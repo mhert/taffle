@@ -106,7 +106,7 @@ jobs:
 
           # The arm of `From<WriterIoError> for ConvertError` that stands for a writer error the
           # writer cannot yet return.
-          printf '%s\n' "$PWD/crates/taf-encode/src/convert.rs:397" > allowed.txt
+          printf '%s\n' "$PWD/crates/taf-encode/src/convert.rs:411" > allowed.txt
 
           # A `break` that ends a walk which does not advance. Nothing can reach it while `atom_at`
           # refuses an atom shorter than its own header — the test

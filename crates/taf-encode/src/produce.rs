@@ -15,6 +15,14 @@
 //! to be handed them: a chapter is begun in front of the block behind it, and blocks travel in the
 //! order they play. A thread decides *when* the work happens and never what it comes to, so the
 //! file is byte for byte the file it was.
+//!
+//! # Where the chapter rules this runs are written down
+//!
+//! The code here is what applies them, but they are stated in [`crate::convert`]'s module header:
+//! the three ways a plan comes about, what every plan holds, how a mark is made to fit where an
+//! explicit offset is refused, why several inputs are their own chapters and are streamed one by
+//! one, and where the leading silence operations belong. What follows below is those rules run, not
+//! a second set of them.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -31,7 +39,7 @@ const CHANNELS: u16 = 2;
 
 /// What the reading hands the encoding, in the order the encoding takes it.
 pub(crate) enum Feed {
-    /// The conversion has reached input `0` and is reading it, counted over all inputs.
+    /// The conversion has reached this input and is reading it, counted over all inputs.
     Reached(usize),
     /// A chapter begins in front of the next block, under this title.
     Chapter(Option<String>),

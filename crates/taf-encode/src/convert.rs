@@ -9,6 +9,20 @@
 //! not known until it has been read to the end, so nothing that has to be settled in front of the
 //! audio may depend on it.
 //!
+//! # One pass, and who runs where
+//!
+//! Reading once is not the same as running alone. The inputs are read in order by one reader, which
+//! runs ahead of everything else on a thread of its own; the blocks it hands over are cut into
+//! chunks on the packet grid; the chunks are encoded by a pool of workers, as many as
+//! [`Conversion::workers`] asks for; and the packets they hand back are written into the file here,
+//! on this thread, in the order the chunks were cut.
+//!
+//! What that buys is the cores of the machine, and what it costs the file is nothing: a cut falls
+//! where the audio puts it, a chunk encodes to the same packets whichever worker takes it, and the
+//! writing follows the cutting rather than the finishing. So the whole of the rest of this module
+//! header still holds exactly as written — the plan, the marks, the silence — and the bytes are the
+//! same on one core as on sixteen. [`convert`] states that in full.
+//!
 //! # The three ways a plan comes about
 //!
 //! 1. **The caller states it.** [`ChapterMode::Explicit`] is what `--chapters` parsed to, and it
