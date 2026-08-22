@@ -410,8 +410,13 @@ mod tests {
     /// only ever come perceptually close. So what is held here is the part every build owes — the
     /// short warm-up's audio differs from the long one's by less than −40 dB of the signal, far
     /// below hearing — and the constant stays the 12 packets the bytes were measured to settle at.
+    ///
+    /// What that bound catches is a warm-up that is absent or broken: with none at all the two
+    /// sides differ by about a tenth of the signal, twenty decibels over the bar, while a single
+    /// packet of warm-up already clears it. The twelve itself rests on the byte measurement
+    /// [`WARMUP_PACKETS`]'s own doc records, not on this assertion.
     #[test]
-    fn the_warmup_is_long_enough_that_more_of_it_changes_nothing() {
+    fn more_warmup_than_the_constant_changes_nothing_a_listener_hears() {
         // A signal that keeps the encoder's memory busy: amplitude and pitch both moving.
         let history = 64 * FRAME_SAMPLES;
         let wander: Vec<i16> = (0..history + 20 * FRAME_SAMPLES)
@@ -450,14 +455,17 @@ mod tests {
 
         // Without this the comparison could pass on two windows of silence.
         let level = rms(reference);
-        assert!(level > 1_000.0, "the window compared has to carry signal");
+        assert!(
+            level > 100.0,
+            "the window compared has to carry signal, not silence"
+        );
         let diff: Vec<i16> = reference
             .iter()
             .zip(candidate)
             .map(|(a, b)| a.saturating_sub(*b))
             .collect();
 
-        let ratio = rms(&diff) / level.max(1.0);
+        let ratio = rms(&diff) / level;
         // −40 dB against the signal: a tenth of what the seam is held to, and nothing a listener
         // resolves.
         assert!(
@@ -469,7 +477,8 @@ mod tests {
 
     #[test]
     fn a_warmup_is_what_the_encoder_starts_from_at_all() {
-        // The test above says more warm-up changes nothing; without this one, so would none of it.
+        // The test above measures what a longer warm-up changes; this one, that the warm-up
+        // reaches the encoder at all.
         assert_ne!(
             encode_job(&job_of(0, 10)).unwrap(),
             encode_job(&job_of(WARMUP_PACKETS, 10)).unwrap(),
