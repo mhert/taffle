@@ -103,10 +103,9 @@ pub struct JobOutcome {
 ///
 /// - [`JobError::OpenInput`] if an input could not be opened.
 /// - [`JobError::CreateOutput`] if the TAF could not be created.
-/// - [`JobError::Convert`] if the conversion itself failed, or the last of what was written could
-///   not be got onto the disk. A job of no inputs is one of those, refused as
-///   [`ChapterError::Empty`] before a file is made for it: what the engine calls having nothing to
-///   convert is what a caller is handed here, rather than a second name for it.
+/// - [`JobError::Convert`] if the conversion itself failed. A job of no inputs is one of those,
+///   refused as [`ChapterError::Empty`] before a file is made for it: what the engine calls having
+///   nothing to convert is what a caller is handed here, rather than a second name for it.
 ///
 /// A conversion that failed part-way leaves the output file behind holding what was written before
 /// it failed, which is [`taf_encode::convert()`]'s business and stated there.
@@ -137,10 +136,11 @@ pub fn run_convert(
         source,
     })?;
     // The engine writes the file in many small pieces, and a buffer in front of it turns those
-    // into few whole writes rather than a syscall apiece.
+    // into few whole writes rather than a syscall apiece. Finishing the file seeks back to fill in
+    // the header block and flushes, so a buffered write that failed is reported by the conversion
+    // and not left for the drop to swallow.
     let mut out = std::io::BufWriter::new(out);
     let report = convert(sources, &options, clock_audio_id(), &mut out, progress)?;
-    flushed(out).map_err(|source| JobError::Convert(source.into()))?;
 
     // A cover that was not asked for and one that no input carried come to the same thing here:
     // nothing beside the file, and nothing to say about it.
@@ -208,16 +208,6 @@ fn opened(paths: &[PathBuf]) -> Result<Vec<Input>, JobError> {
         .collect()
 }
 
-/// Flushes what the writer still holds, so a write the buffer kept back fails here and not
-/// silently in a drop.
-///
-/// # Errors
-///
-/// The io error the flush came back with.
-fn flushed<W: std::io::Write>(mut out: W) -> std::io::Result<()> {
-    out.flush()
-}
-
 /// The audio id a conversion is given: what time it is, in seconds since the Unix epoch.
 ///
 /// The one clock read in taffle, and the reason the engine has none.
@@ -234,26 +224,4 @@ fn clock_audio_id() -> AudioId {
     let truncated = seconds as u32;
 
     AudioId::new(truncated)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::flushed;
-
-    #[test]
-    fn a_flush_that_fails_is_a_failure_and_not_a_shrug() {
-        struct Refuses;
-        impl std::io::Write for Refuses {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Err(std::io::Error::other("the disk went away"))
-            }
-        }
-
-        let failure = flushed(Refuses);
-
-        assert!(failure.is_err());
-    }
 }
