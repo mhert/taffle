@@ -131,6 +131,9 @@ pub(crate) struct TafEncoder<W: Write + Seek> {
     writer: StdTafWriter<Digest, Counted<W>>,
     /// The samples of the frame being filled, interleaved and fewer than a whole frame's.
     pending: Vec<i16>,
+    /// The packet in flight, reused frame after frame: libopus writes into it and the writer reads
+    /// out of it.
+    packet: Vec<u8>,
     /// The frames of one channel encoded so far, the silence a frame was filled out with counted
     /// in — which is where the audio of the next chapter begins.
     frames: u64,
@@ -163,6 +166,7 @@ impl<W: Write + Seek> TafEncoder<W> {
             encoder,
             writer,
             pending: Vec::with_capacity(FRAME_SAMPLES),
+            packet: vec![0; MAX_PACKET],
             frames: 0,
             written,
         })
@@ -250,8 +254,11 @@ impl<W: Write + Seek> TafEncoder<W> {
     /// puts the packet in the file.
     fn encode_frame(&mut self) -> Result<(), ConvertError> {
         self.pending.resize(FRAME_SAMPLES, 0);
-        let packet = self.encoder.encode_vec(&self.pending, MAX_PACKET)?;
-        self.writer.add_packet(&packet, FRAME)?;
+        let len = self.encoder.encode(&self.pending, &mut self.packet)?;
+        // The length libopus states is at most the buffer it was handed, so this never comes up
+        // empty for a packet that was written.
+        let packet = self.packet.get(..len).unwrap_or_default();
+        self.writer.add_packet(packet, FRAME)?;
 
         self.pending.clear();
         self.frames = self.frames.saturating_add(u64::from(FRAME));
