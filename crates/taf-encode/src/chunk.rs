@@ -43,8 +43,10 @@ pub(crate) const TARGET_PACKETS: usize = 333;
 /// How far a cut may move to land on a pause: ~2 s either way.
 pub(crate) const SNAP_PACKETS: usize = 33;
 
-/// How many packets warm a fresh encoder up; derived by the convergence test in `encode.rs`.
-pub(crate) const WARMUP_PACKETS: usize = 4;
+/// How many packets warm a fresh encoder up: the shortest warm-up the convergence test in
+/// `encode.rs` cannot tell apart from a far longer one, since by then the state a fresh encoder
+/// starts from has leaked back out of it.
+pub(crate) const WARMUP_PACKETS: usize = 12;
 
 /// One chunk of the conversion, as the encoding side is handed it.
 pub(crate) struct Job {

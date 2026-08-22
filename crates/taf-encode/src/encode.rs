@@ -145,6 +145,10 @@ fn configured() -> Result<Encoder, opus::Error> {
 /// A fresh encoder per job is what makes a job's bytes a function of the job alone — nothing here
 /// carries over from the job in front of it or depends on which worker took it.
 ///
+/// Both stretches of a job are whole packets, since the chunker fills every job out to them, and
+/// that is what this asks of a caller: samples short of a whole packet are not a packet, and what
+/// is left over at the end of either stretch is dropped rather than encoded.
+///
 /// # Errors
 ///
 /// [`opus::Error`] if libopus refuses the settings or a frame.
@@ -260,19 +264,23 @@ impl<W: Write + Seek> PacketSink<W> {
 }
 
 #[cfg(test)]
+// Every cast below is on a count a test states or on a wave bounded by the level it was scaled
+// with, and every index is into a stream a test built or the chunker just handed out.
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
 )]
 mod tests {
     use std::io::Cursor;
 
     use taf::id::AudioId;
 
-    use super::{encode_job, PacketSink, FRAME, FRAME_SAMPLES, MAX_PACKET};
-    use crate::chunk::Job;
+    use super::{encode_job, PacketSink, FRAME, FRAME_SAMPLES, MAX_PACKET, RATE};
+    use crate::chunk::{Chunker, Job, SNAP_PACKETS, TARGET_PACKETS, WARMUP_PACKETS};
 
     /// A job of `packets` whole packets of a quiet ramp, warmed up by `warmup` packets of the same.
     fn job_of(warmup: usize, packets: usize) -> Job {
@@ -288,6 +296,37 @@ mod tests {
             pcm: ramp(packets * FRAME_SAMPLES),
             chapters: Vec::new(),
         }
+    }
+
+    /// A dense tone: every packet equally loud, so a chunker cut lands mid-sound — the seam with
+    /// nothing to hide behind.
+    fn dense_tone(packets: usize) -> Vec<i16> {
+        (0..packets * FRAME_SAMPLES)
+            .map(|at| {
+                let angle = (at / 2) as f64 * 2.0 * std::f64::consts::PI * 440.0 / f64::from(RATE);
+                (angle.sin() * 16_000.0) as i16
+            })
+            .collect()
+    }
+
+    /// The root mean square of a stretch of samples.
+    fn rms(samples: &[i16]) -> f64 {
+        let sum: f64 = samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+        (sum / samples.len().max(1) as f64).sqrt()
+    }
+
+    /// Decodes a packet stream to interleaved samples.
+    fn decoded_stream(batches: &[Vec<Vec<u8>>]) -> Vec<i16> {
+        let mut decoder = opus::Decoder::new(RATE, opus::Channels::Stereo).unwrap();
+        let mut out = Vec::new();
+        let mut frame = vec![0_i16; FRAME_SAMPLES];
+        for batch in batches {
+            for packet in batch {
+                let frames = decoder.decode(packet, &mut frame, false).unwrap();
+                out.extend_from_slice(&frame[..frames * 2]);
+            }
+        }
+        out
     }
 
     #[test]
@@ -309,7 +348,7 @@ mod tests {
     #[test]
     fn the_packets_a_job_encodes_are_opus_a_decoder_reads() {
         let batch = encode_job(&job_of(0, 3)).unwrap();
-        let mut decoder = opus::Decoder::new(48_000, opus::Channels::Stereo).unwrap();
+        let mut decoder = opus::Decoder::new(RATE, opus::Channels::Stereo).unwrap();
         let mut samples = vec![0_i16; FRAME_SAMPLES];
 
         for packet in &batch {
@@ -319,6 +358,97 @@ mod tests {
                 "every packet carries one whole frame"
             );
         }
+    }
+
+    #[test]
+    fn a_seam_cut_mid_tone_is_below_hearing() {
+        let packets = TARGET_PACKETS + SNAP_PACKETS + 50;
+        let samples = dense_tone(packets);
+
+        // The whole tone through one continuous encoder — the reference.
+        let whole = Job {
+            index: 0,
+            warmup: Vec::new(),
+            pcm: samples.clone(),
+            chapters: Vec::new(),
+        };
+        let continuous = decoded_stream(&[encode_job(&whole).unwrap()]);
+
+        // The same tone through the chunker: every packet equally loud, so the cut lands at the
+        // earliest packet of the snap window — mid-tone by construction.
+        let mut chunker = Chunker::new();
+        let mut jobs = Vec::new();
+        jobs.extend(chunker.push_block(samples));
+        jobs.extend(chunker.finish());
+        assert!(jobs.len() >= 2, "the fixture must actually produce a seam");
+        let seam = jobs[0].pcm.len();
+        let in_chunks = decoded_stream(
+            &jobs
+                .iter()
+                .map(|job| encode_job(job).unwrap())
+                .collect::<Vec<_>>(),
+        );
+
+        // ±200 ms around the seam, skipping nothing: if the warm-up were not enough, this is
+        // exactly where the two streams would part.
+        let window = 9_600 * 2;
+        let around = seam.saturating_sub(window)..(seam + window).min(continuous.len());
+        let diff: Vec<i16> = continuous[around.clone()]
+            .iter()
+            .zip(&in_chunks[around.clone()])
+            .map(|(a, b)| a.saturating_sub(*b))
+            .collect();
+
+        let ratio = rms(&diff) / rms(&continuous[around]).max(1.0);
+        // −30 dB against the signal: conservative for a codec whose own floor sits lower, and far
+        // below what a listener resolves at a chapter's pace.
+        assert!(ratio < 0.0316, "the seam stands {ratio} of the signal tall");
+    }
+
+    #[test]
+    fn the_warmup_is_long_enough_that_more_of_it_changes_nothing() {
+        // A signal that keeps the encoder's memory busy: amplitude and pitch both moving.
+        let history = 64 * FRAME_SAMPLES;
+        let wander: Vec<i16> = (0..history + 20 * FRAME_SAMPLES)
+            .map(|at| {
+                let t = (at / 2) as f64 / f64::from(RATE);
+                let pitch = 300.0 + 150.0 * (t * 0.7).sin();
+                let level = 8_000.0 + 7_000.0 * (t * 1.3).sin();
+                ((t * 2.0 * std::f64::consts::PI * pitch).sin() * level) as i16
+            })
+            .collect();
+        let chunk = wander[history..].to_vec();
+        let tail = |packets: usize| wander[history - packets * FRAME_SAMPLES..history].to_vec();
+
+        let short = encode_job(&Job {
+            index: 0,
+            warmup: tail(WARMUP_PACKETS),
+            pcm: chunk.clone(),
+            chapters: Vec::new(),
+        })
+        .unwrap();
+        let long = encode_job(&Job {
+            index: 0,
+            warmup: tail(32),
+            pcm: chunk,
+            chapters: Vec::new(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            short, long,
+            "a warm-up of {WARMUP_PACKETS} packets has not converged; raise WARMUP_PACKETS"
+        );
+    }
+
+    #[test]
+    fn a_warmup_is_what_the_encoder_starts_from_at_all() {
+        // The test above says more warm-up changes nothing; without this one, so would none of it.
+        assert_ne!(
+            encode_job(&job_of(0, 10)).unwrap(),
+            encode_job(&job_of(WARMUP_PACKETS, 10)).unwrap(),
+            "the warm-up packets left no trace in the encoder"
+        );
     }
 
     #[test]
