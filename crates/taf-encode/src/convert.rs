@@ -99,11 +99,8 @@
 //! boundary or an offset the caller typed having none at all.
 
 use core::fmt;
-use std::cell::{Cell, RefCell};
 use std::io::{Seek, Write};
-use std::rc::Rc;
 use std::time::Duration;
-use std::vec::IntoIter;
 
 use symphonia::core::io::MediaSource;
 use taf::id::{AudioId, BlockIndex};
@@ -111,15 +108,20 @@ use taf::ogg::OPUS_PRE_SKIP;
 use taf::writer::{WriterError, WriterIoError};
 
 use crate::chapters::{ChapterError, ChapterMode};
-use crate::decode::{open_source, AudioSource, Cover, DecodeError, SourceMetadata, SourceSpec};
+use crate::decode::Cover;
 use crate::encode::TafEncoder;
-use crate::pcm::{Pcm48, PcmError, SilenceOpts, SilenceProcessor};
+use crate::pcm::{PcmError, SilenceOpts};
+use crate::produce::{produce, Feed, Produced};
 
 /// The rate everything behind the sample stage is counted at, and the one a TAF carries.
-const RATE: u32 = 48_000;
+pub(crate) const RATE: u32 = 48_000;
 
 /// The channels every block behind it interleaves.
-const CHANNELS: u16 = 2;
+pub(crate) const CHANNELS: u16 = 2;
+
+/// How many blocks the producer may run ahead: a block is a few thousand samples, so this is
+/// well under a second of audio and a bounded amount of memory.
+const FEED_DEPTH: usize = 64;
 
 /// One input of a conversion.
 ///
@@ -220,6 +222,14 @@ pub struct ConversionReport {
 /// zeros that were reserved for it. Offsets that do not strictly increase need no length to be
 /// refused, and are refused before anything is written at all.
 ///
+/// # The audio is read ahead of being encoded
+///
+/// The inputs are read and decoded on a thread of their own, which hands the blocks over a bounded
+/// channel, so that reading the input behind one overlaps encoding the one in hand. Nothing about
+/// the file follows from that: the encoder is handed the same blocks in the same order it always
+/// was, on this thread, and `progress` is called from here as well — so `out` and the callback see
+/// one thread, and the file is the file it was.
+///
 /// # Errors
 ///
 /// - [`ConvertError::Chapters`] if there are no inputs, or the offsets stated are no plan.
@@ -240,75 +250,54 @@ pub fn convert<W: Write + Seek>(
         increasing(offsets)?;
     }
 
-    let names: Vec<String> = inputs.iter().map(|input| input.name.clone()).collect();
-    let reading = Rc::new(Reading::default());
-    // What a failure of the stream says: the input it happened in, and the failure the
-    // concatenation kept where the trait it hands blocks over had no room for it.
-    let failed = |source: PcmError| ConvertError::Input {
-        name: names.get(reading.at.get()).cloned().unwrap_or_default(),
-        source: reading.kept().unwrap_or(source),
-    };
-
     let mut encoder = TafEncoder::new(audio_id, out)?;
     let mut chapters: Vec<ChapterOut> = Vec::new();
-    let mut opening_title = None;
-    let mut reported = 0;
 
-    let streams = streamed(inputs, &opts.chapter_mode);
-    let per_input = streams.len() > 1;
+    let produced = std::thread::scope(|scope| -> Result<Produced, ConvertError> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(FEED_DEPTH);
+        let decoding = scope.spawn(move || produce(inputs, opts, &tx));
 
-    for (base, inputs) in streams {
-        let mut concat = Concat::new(inputs, base, Rc::clone(&reading));
-        let marks = concat.prime().map_err(&failed)?;
-        reached(&reading, &mut reported, progress);
-
-        let plan = match (&opts.chapter_mode, per_input) {
-            (ChapterMode::Explicit(offsets), _) => stated(offsets),
-            // One input, and the marks it carried are the chapters it has.
-            (ChapterMode::Auto, false) => authored(marks),
-            // One of several, which is one chapter beginning where it does.
-            (ChapterMode::Auto, true) => vec![Chapter::opening()],
-        };
-        if base == 0 {
-            opening_title = plan.first().and_then(|chapter| chapter.title.clone());
-        }
-
-        let offsets = plan.iter().map(|chapter| chapter.offset).collect();
-        let pcm = Pcm48::new(Box::new(concat)).map_err(&failed)?;
-        let mut stream = SilenceProcessor::new(pcm, offsets, silence(&opts.silence, base));
-        let mut begun = 0;
-
-        while let Some(block) = stream.next_block().map_err(&failed)? {
-            reached(&reading, &mut reported, progress);
-
-            // Every chapter whose place is settled begins in front of this block: the frame in
-            // hand is filled out and the chapter starts the block behind it.
-            let settled = stream.chapters_emitted().len();
-            for at in begun..settled {
-                encoder.begin_chapter()?;
-                place(
-                    &mut chapters,
-                    ChapterOut {
-                        page: encoder.block(),
-                        start: position(encoder.frames()),
-                        title: plan.get(at).and_then(|chapter| chapter.title.clone()),
-                    },
-                );
+        let mut outcome = Ok(());
+        for feed in &rx {
+            let fed = match feed {
+                Feed::Reached(input_index) => {
+                    progress(Progress::Decoding { input_index });
+                    Ok(())
+                }
+                Feed::Chapter(title) => encoder.begin_chapter().map(|()| {
+                    place(
+                        &mut chapters,
+                        ChapterOut {
+                            page: encoder.block(),
+                            start: position(encoder.frames()),
+                            title,
+                        },
+                    );
+                }),
+                Feed::Block(block) => encoder.push(&block).map(|()| {
+                    progress(Progress::Encoded {
+                        samples_done: encoder.frames(),
+                    });
+                }),
+            };
+            if let Err(failure) = fed {
+                outcome = Err(failure);
+                break;
             }
-            begun = settled;
-
-            encoder.push(&block)?;
-            progress(Progress::Encoded {
-                samples_done: encoder.frames(),
-            });
         }
+        // Dropping the receiver is what stops a producer whose consumer failed.
+        drop(rx);
 
-        // An input that handed out no blocks at all was still reached.
-        reached(&reading, &mut reported, progress);
-    }
+        let produced = decoding
+            .join()
+            .map_err(|_| ConvertError::Io(std::io::Error::other("the decoding thread failed")))?;
+        outcome?;
+
+        produced
+    })?;
 
     if let ChapterMode::Explicit(offsets) = &opts.chapter_mode {
-        within(offsets, reading.frames.get())?;
+        within(offsets, produced.frames)?;
     }
 
     progress(Progress::Finalizing);
@@ -319,14 +308,14 @@ pub fn convert<W: Write + Seek>(
         chapters.push(ChapterOut {
             page: BlockIndex::new(0),
             start: Duration::ZERO,
-            title: opening_title,
+            title: produced.opening_title,
         });
     }
 
     Ok(ConversionReport {
         chapters,
         duration: playtime(frames),
-        cover: reading.cover.take(),
+        cover: produced.cover,
         audio_id,
     })
 }
@@ -370,281 +359,6 @@ impl From<WriterIoError> for ConvertError {
     }
 }
 
-/// Where a chapter begins and what it is called: a mark an input carried, and an entry of the plan
-/// a conversion runs — which are the same thing, since a plan is what became of the marks.
-///
-/// Offsets are frames at 48 kHz, counted from the start of the stream the chapter belongs to.
-struct Chapter {
-    offset: u64,
-    title: Option<String>,
-}
-
-impl Chapter {
-    /// The chapter every plan begins with, which no mark named.
-    fn opening() -> Self {
-        Self {
-            offset: 0,
-            title: None,
-        }
-    }
-}
-
-/// What the concatenation under a conversion tells it while it runs.
-///
-/// The stream a conversion pulls from is inside the silence processing by the time it runs, so what
-/// happens down there is left here on the way past: which input is being read, how much they have
-/// decoded to, the cover art the first one to carry any carried — and the one failure a source
-/// cannot state in the error type its trait hands back.
-#[derive(Default)]
-struct Reading {
-    /// The input being read, counted over the whole conversion.
-    at: Cell<usize>,
-    /// The frames of 48 kHz stereo the inputs have decoded to, which is what an offset the caller
-    /// states is counted in.
-    frames: Cell<u64>,
-    /// The cover art of the first input that carried any.
-    cover: RefCell<Option<Cover>>,
-    /// A failure of the sample stage, kept where [`DecodeError`] has no room for it.
-    failure: RefCell<Option<PcmError>>,
-}
-
-impl Reading {
-    /// The failure that was kept where it could not be stated, if one was.
-    fn kept(&self) -> Option<PcmError> {
-        self.failure.borrow_mut().take()
-    }
-
-    /// Keeps `cover` where nothing has been kept yet: the cover a conversion has is the one the
-    /// first input to carry any carried.
-    fn carry(&self, cover: Option<Cover>) {
-        let mut carried = self.cover.borrow_mut();
-
-        if carried.is_none() {
-            *carried = cover;
-        }
-    }
-}
-
-/// The inputs of a conversion as one stream: each of them decoded and brought to 48 kHz stereo on
-/// its own, one after the other.
-///
-/// Which makes the concatenation an [`AudioSource`] of exactly the shape the sample stage brings
-/// everything to, so the [`Pcm48`] over it hands its blocks through untouched — and a whole
-/// conversion, several files and all, goes through one [`SilenceProcessor`]. Counting the frames
-/// here is the same count [`Pcm48::scale_samples`] answers in, so a chapter offset and the length
-/// it is held against are in one unit without anything being scaled twice.
-struct Concat {
-    /// The inputs still to be opened, in the order they play.
-    pending: IntoIter<Input>,
-    /// The one being read.
-    current: Option<Pcm48>,
-    /// How many of them have been opened.
-    opened: usize,
-    /// Where the first of them stands in the conversion, so that what is reported about an input
-    /// is counted over every input there is and not over this stream's.
-    base: usize,
-    /// What the conversion around this is told while it runs.
-    reading: Rc<Reading>,
-}
-
-impl Concat {
-    /// A stream over `inputs`, the first of which is input `base` of the conversion.
-    fn new(inputs: Vec<Input>, base: usize, reading: Rc<Reading>) -> Self {
-        Self {
-            pending: inputs.into_iter(),
-            current: None,
-            opened: 0,
-            base,
-            reading,
-        }
-    }
-
-    /// Opens the first input and hands over the chapter marks it carried.
-    ///
-    /// Opening it here rather than at the first block is what lets those marks be the plan the
-    /// conversion runs: they have to be in front of the stream that places them.
-    fn prime(&mut self) -> Result<Vec<Chapter>, PcmError> {
-        Ok(self.open()?.unwrap_or_default())
-    }
-
-    /// Opens the next input, if there is one, and hands over the marks it carried.
-    fn open(&mut self) -> Result<Option<Vec<Chapter>>, DecodeError> {
-        let Some(input) = self.pending.next() else {
-            return Ok(None);
-        };
-        self.reading.at.set(self.base + self.opened);
-        self.opened += 1;
-
-        let mut source = open_source(input.reader)?;
-        // Everything the container says about the recording is read in front of the stage that
-        // consumes the source, and the marks are scaled by the stage that knows what it did to the
-        // samples around them.
-        let metadata = source.metadata();
-        let pcm = Pcm48::new(source).map_err(|failure| self.keep(failure))?;
-        let marks = metadata
-            .chapters
-            .into_iter()
-            .map(|mark| Chapter {
-                offset: pcm.scale_samples(mark.start_sample),
-                title: mark.title,
-            })
-            .collect();
-
-        self.reading.carry(metadata.cover);
-        self.current = Some(pcm);
-
-        Ok(Some(marks))
-    }
-
-    /// Keeps a failure of the sample stage where the conversion picks it up, and states what a
-    /// source's own error type can say about it.
-    ///
-    /// A source states its failures as [`DecodeError`], which has no shape for the sample stage's
-    /// own — so one of those is left where the conversion takes it, the way `taf`'s writer leaves
-    /// the io error a page sink could not report. A decode failure is the one shape both types
-    /// hold, and travels as itself.
-    fn keep(&self, failure: PcmError) -> DecodeError {
-        match failure {
-            PcmError::Decode(failure) => failure,
-            failure => {
-                self.reading.failure.replace(Some(failure));
-
-                DecodeError::UnsupportedFormat
-            }
-        }
-    }
-}
-
-impl AudioSource for Concat {
-    fn spec(&self) -> SourceSpec {
-        SourceSpec {
-            sample_rate: RATE,
-            channels: CHANNELS,
-        }
-    }
-
-    /// Nothing of its own: what each input carried was read as that input was opened.
-    fn metadata(&mut self) -> SourceMetadata {
-        SourceMetadata::default()
-    }
-
-    fn next_block(&mut self) -> Result<Option<Vec<i16>>, DecodeError> {
-        loop {
-            let Some(pcm) = self.current.as_mut() else {
-                // The next input, and the end of the stream where there is none left to open.
-                // What that input carried is the plan's business, and a plan is settled in front
-                // of the stream it is placed in.
-                let _ = self.open()?;
-                if self.current.is_none() {
-                    return Ok(None);
-                }
-
-                continue;
-            };
-
-            match pcm.next_block() {
-                Ok(Some(block)) => {
-                    let frames =
-                        u64::try_from(block.len() / usize::from(CHANNELS)).unwrap_or(u64::MAX);
-                    self.reading
-                        .frames
-                        .set(self.reading.frames.get().saturating_add(frames));
-
-                    return Ok(Some(block));
-                }
-                // The end of this input, which is where the next one begins.
-                Ok(None) => self.current = None,
-                Err(failure) => return Err(self.keep(failure)),
-            }
-        }
-    }
-}
-
-/// How the inputs are streamed: one stream per input where the boundaries between them are the
-/// chapters, and one stream over all of them otherwise.
-fn streamed(inputs: Vec<Input>, mode: &ChapterMode) -> Vec<(usize, Vec<Input>)> {
-    if matches!(mode, ChapterMode::Auto) && inputs.len() > 1 {
-        return inputs
-            .into_iter()
-            .enumerate()
-            .map(|(at, input)| (at, vec![input]))
-            .collect();
-    }
-
-    vec![(0, inputs)]
-}
-
-/// What the silence operations are for the stream beginning at input `base`.
-///
-/// The leading ones are the conversion's own and belong to the audio's first frame, so a stream
-/// that does not begin there is handed the per-chapter ones only — which are what a file boundary
-/// gets, since a boundary is where a chapter begins.
-fn silence(opts: &SilenceOpts, base: usize) -> SilenceOpts {
-    if base == 0 {
-        return *opts;
-    }
-
-    SilenceOpts {
-        skip_leading: 0,
-        trim_leading: false,
-        add_pause_leading: 0,
-        ..*opts
-    }
-}
-
-/// The plan the marks an input carried make.
-///
-/// Every plan begins at offset 0, since the first chapter of a TAF begins where its audio does, and
-/// its offsets strictly increase: a mark where a chapter already begins is that chapter rather than
-/// another, under the name the first mark there carried.
-///
-/// Marks come out of a container in the order the container states them, which is not necessarily
-/// the order they play in — so they are sorted here, and the sort is stable, which is what makes
-/// the first mark stated at a place the one that names it.
-///
-/// The half of the rule that needs a length is the stream's: a mark at or behind the end of the
-/// audio never begins a chapter, because the stream ends in front of the block it would have begun
-/// — and nothing knows where that end is until the audio has run out.
-fn authored(mut marks: Vec<Chapter>) -> Vec<Chapter> {
-    marks.sort_by_key(|mark| mark.offset);
-
-    let mut plan: Vec<Chapter> = Vec::with_capacity(marks.len() + 1);
-    for mark in marks {
-        match plan.last() {
-            // Behind the last chapter planned, so a chapter of its own.
-            Some(last) if mark.offset > last.offset => plan.push(mark),
-            // Where one already begins, which is that same chapter.
-            Some(_) => {}
-            // The first of them, which is the chapter the file opens with where it begins at the
-            // start of the audio — and the one behind it where nothing was marked there.
-            None if mark.offset == 0 => plan.push(mark),
-            None => plan.extend([Chapter::opening(), mark]),
-        }
-    }
-    if plan.is_empty() {
-        plan.push(Chapter::opening());
-    }
-
-    plan
-}
-
-/// The plan the caller stated.
-///
-/// No chapter of one is named: an offset somebody typed is a place, and what an input happened to
-/// call a mark near it is not that place's name.
-fn stated(offsets: &[u64]) -> Vec<Chapter> {
-    let mut plan = Vec::with_capacity(offsets.len() + 1);
-    if offsets.first() != Some(&0) {
-        plan.push(Chapter::opening());
-    }
-    plan.extend(offsets.iter().map(|offset| Chapter {
-        offset: *offset,
-        title: None,
-    }));
-
-    plan
-}
-
 /// Whether the offsets the caller stated could be a plan at all: the half of the check that needs
 /// no length, and so the half that is answered before anything is written.
 fn increasing(offsets: &[u64]) -> Result<(), ChapterError> {
@@ -686,19 +400,6 @@ fn place(chapters: &mut Vec<ChapterOut>, chapter: ChapterOut) {
     }
 }
 
-/// Reports every input the conversion has reached since it last did.
-///
-/// An input is reached once, in the order they play: the concatenation states which one it is
-/// reading, and everything from the last one reported to that one is announced here.
-fn reached(reading: &Reading, reported: &mut usize, progress: &mut dyn FnMut(Progress)) {
-    let at = reading.at.get();
-
-    for input_index in *reported..=at {
-        progress(Progress::Decoding { input_index });
-    }
-    *reported = at.saturating_add(1);
-}
-
 /// How far into the audio `frames` frames at 48 kHz lie.
 ///
 /// Whole seconds and the nanoseconds left over, so that nothing is lost to a float on the way: one
@@ -725,12 +426,8 @@ fn playtime(frames: u64) -> Duration {
     clippy::indexing_slicing
 )]
 mod tests {
-    use super::{
-        AudioSource, Concat, ConvertError, Input, Progress, Reading, SourceMetadata, WriterError,
-        WriterIoError,
-    };
+    use super::{ConvertError, Input, Progress, WriterError, WriterIoError};
     use std::io::{self, Cursor};
-    use std::rc::Rc;
 
     #[test]
     fn an_input_shows_what_it_is_called_and_not_the_bytes_behind_it() {
@@ -772,21 +469,5 @@ mod tests {
             }
         );
         assert_ne!(Progress::Finalizing, Progress::Decoding { input_index: 0 });
-    }
-
-    #[test]
-    fn nothing_is_kept_where_nothing_went_wrong() {
-        let reading = Reading::default();
-
-        assert!(reading.kept().is_none());
-    }
-
-    #[test]
-    fn a_concatenation_carries_no_metadata_of_its_own() {
-        // What the inputs carried was read as each of them was opened, in front of the stage that
-        // consumed the source — so there is nothing left here to answer with.
-        let mut concat = Concat::new(Vec::new(), 0, Rc::new(Reading::default()));
-
-        assert_eq!(concat.metadata(), SourceMetadata::default());
     }
 }

@@ -23,6 +23,7 @@ pub mod convert;
 pub mod decode;
 mod encode;
 pub mod pcm;
+mod produce;
 
 pub use opus;
 pub use rubato;
