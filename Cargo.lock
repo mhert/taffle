@@ -807,14 +807,14 @@ dependencies = [
 
 [[package]]
 name = "taf"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "sha1",
 ]
 
 [[package]]
 name = "taf-encode"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ogg",
  "opus",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "taffle"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "sha1",
  "taf",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "taffle-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
