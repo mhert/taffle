@@ -109,10 +109,22 @@ mod tests {
         assert!(args(&["--frobnicate"]).is_err(), "unknown flag");
     }
 
+    /// Every name `dir` holds, sorted — what a run is held to leaving unchanged.
+    fn listing(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(dir)
+            .expect("listing the directory the smoke run is started in")
+            .map(|entry| entry.expect("an entry of it").file_name())
+            .collect();
+        names.sort();
+
+        names
+    }
+
     /// End-to-end QML smoke test: boots the real binary under Qt's `offscreen` platform in
-    /// `--smoke` mode, which instantiates the whole chrome, then exits. Any QML error (bad
-    /// property, missing type, broken binding) surfaces as a diagnostic on stderr and fails
-    /// the test; a run that never finishes fails it too, at the deadline below.
+    /// `--smoke` mode, which instantiates the whole chrome and drives a fake batch through it,
+    /// then exits. Any QML error (bad property, missing type, broken binding) surfaces as a
+    /// diagnostic on stderr and fails the test; a run that never finishes fails it too, at the
+    /// deadline below.
     ///
     /// Lives in the binary's unit tests because the cxx-qt C++ archive references bridge
     /// symbols that only the binary target carries — a `tests/` integration target cannot
@@ -176,12 +188,22 @@ mod tests {
             binary.display()
         );
 
+        // Nothing of the conversion is real, so nothing of it may land on a disk: the run is
+        // held to leaving the directory it was started in exactly as it found it.
+        let started_in = std::env::current_dir().expect("the directory the test runs in");
+        let before = listing(&started_in);
+
         let mut run = std::process::Command::new(&binary)
             .arg("--smoke")
             // No display server needed, and a software scene graph, so the run is the same
             // on a bare CI machine as on a desktop.
             .env("QT_QPA_PLATFORM", "offscreen")
             .env("QT_QUICK_BACKEND", "software")
+            // A Qt Quick Controls style is QML in its own right, and the one a run picks up is
+            // the desktop's: anything that style logs lands on the very stream the scan below
+            // reads, and a style the machine does not have fails the load outright. Pinning the
+            // style Qt ships is what keeps a desktop run and a bare CI run the same run.
+            .env("QT_QUICK_CONTROLS_STYLE", "Basic")
             // Qt sends its messages to the systemd journal instead of stderr whenever it is
             // built against libsystemd and started from a journal-backed session, which would
             // leave the scan below reading an empty stream.
@@ -208,6 +230,7 @@ mod tests {
         };
         let output = run.wait_with_output().expect("the smoke run's output");
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
         let Some(status) = finished else {
             panic!("the smoke run had not finished after {DEADLINE:?} and was killed:\n{stderr}");
@@ -219,6 +242,24 @@ mod tests {
         assert_eq!(
             diagnostic, None,
             "QML diagnostics in the smoke run:\n{stderr}"
+        );
+        // The binary writes its own refusals as "error: …" and the libraries under it write a
+        // good deal of theirs the same way. Saying one is not the same as exiting on it, so the
+        // exit code above does not cover this: a run that has anything to be sorry about has not
+        // booted cleanly, whichever stream it said so on.
+        let reported = stdout
+            .lines()
+            .chain(stderr.lines())
+            .find(|line| line.contains("error:"));
+        assert_eq!(
+            reported, None,
+            "the smoke run reported an error:\n{stdout}{stderr}"
+        );
+        assert_eq!(
+            listing(&started_in),
+            before,
+            "the smoke run left something behind in {}",
+            started_in.display()
         );
     }
 }

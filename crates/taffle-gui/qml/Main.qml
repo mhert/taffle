@@ -23,6 +23,12 @@ ApplicationWindow {
     // taking it as a property of its own can be handed it by name without naming itself.
     readonly property TaffleApp app: TaffleApp {}
 
+    // An empty window instantiates none of what a batch shows — no row, no bar, no line saying
+    // what a book came to — so a smoke run of one would boot half the chrome and call it proof.
+    // The drill puts a finished batch behind the window before the first frame is laid out, so
+    // the run that quits on that frame has drawn the whole of it.
+    Component.onCompleted: if (window.app.smokeMode) window.app.smokeDrill()
+
     // The smoke run leaves on the window's own completion signal rather than after a wall-clock
     // interval, which would only ever be a guess at how slowly the slowest machine boots.
     // afterAnimating is emitted on the GUI thread (the other scene graph signals are not) every

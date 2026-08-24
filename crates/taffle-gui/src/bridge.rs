@@ -225,6 +225,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "clearAll"]
         fn clear_all(self: Pin<&mut Self>);
+
+        /// Puts a made-up book through a made-up conversion, so that the self-test run draws the
+        /// chrome a batch draws. Nothing is converted, read or written.
+        #[qinvokable]
+        #[cxx_name = "smokeDrill"]
+        fn smoke_drill(self: Pin<&mut Self>);
     }
 
     impl cxx_qt::Threading for TaffleApp {}
@@ -593,6 +599,108 @@ impl qobject::TaffleApp {
             rust.books.clear();
             rust.panel = plan::Panel::default();
             rust.panel_durations.clear();
+        }
+        self.as_mut().refresh();
+    }
+
+    /// Puts a made-up book through a made-up conversion.
+    ///
+    /// The self-test boots the whole window and leaves on the first frame it draws, and an empty
+    /// window draws none of what a batch draws: no row, no bar, no line saying what a book came
+    /// to. So the drill queues one book and hands a whole batch's worth of words to the very
+    /// [`Self::apply`] a running batch reports through — and the frame that is drawn is a frame of
+    /// a batch that has just finished, with the next book already being filled in.
+    ///
+    /// Nothing is converted, read or written: the paths name files that are not there, and what
+    /// the conversion came to is fabricated.
+    pub fn smoke_drill(mut self: Pin<&mut Self>) {
+        /// What the drill's book is called and what its files are named: a captured book takes
+        /// its title from its first input, so a hand-built one says the same.
+        const STEM: &str = "taffle-smoke-drill";
+        /// How long the book states it plays. A book that states none shows a stripe instead of a
+        /// percent, and a bar counting a real fraction is the one worth drawing.
+        const STATED: Duration = Duration::from_secs(60);
+        /// How long the fabricated conversion says it wrote: a second past what the inputs
+        /// stated, which is what a conversion that adds a pause writes.
+        const WRITTEN: Duration = Duration::from_secs(61);
+
+        let temp = std::env::temp_dir();
+        let taf_path = temp.join(format!("{STEM}.taf"));
+        let panel = plan::Panel {
+            files: vec![temp.join(format!("{STEM}.m4b"))],
+            ..plan::Panel::default()
+        };
+        // Built rather than captured: `plan::capture` answers with a `Result`, and a drill that
+        // could quietly decline to run would leave the self-test passing while proving nothing.
+        let plan = plan::BookPlan {
+            title: STEM.to_owned(),
+            job: taffle::ConvertJob {
+                inputs: panel.files.clone(),
+                output: Some(taf_path.clone()),
+                options: taffle::Conversion::default(),
+                write_cover: panel.extract_cover,
+            },
+            panel,
+        };
+        {
+            let mut rust = self.as_mut().rust_mut();
+            let at = rust.books.len();
+            rust.books.push(Book {
+                plan,
+                probed: Some(STATED),
+                state: BookState::Ready,
+            });
+            // The one job of this batch is the book just queued, wherever it landed.
+            rust.batch = vec![at];
+        }
+        // A run is on from where it is started until it says it is done, so the drill's is too:
+        // what turns it off again is `BatchDone` going through `apply`, the way a real one's does.
+        self.as_mut().set_converting(true);
+
+        let second = |seconds: u64| seconds * u64::from(RATE);
+        for event in [
+            worker::Event::Started { index: 0 },
+            // A quarter of the book, then half of it, then three quarters: every step leaves the
+            // bar somewhere a bar can be read.
+            worker::Event::Progress {
+                index: 0,
+                samples_done: second(15),
+            },
+            worker::Event::Progress {
+                index: 0,
+                samples_done: second(30),
+            },
+            worker::Event::Progress {
+                index: 0,
+                samples_done: second(45),
+            },
+            worker::Event::Finished {
+                index: 0,
+                result: Ok(taffle::JobOutcome {
+                    taf_path,
+                    cover_path: None,
+                    cover_error: None,
+                    report: taffle::ConversionReport {
+                        chapters: vec![],
+                        duration: WRITTEN,
+                        cover: None,
+                        audio_id: taffle::AudioId::new(1),
+                    },
+                }),
+            },
+            worker::Event::BatchDone,
+        ] {
+            self.as_mut().apply(event);
+        }
+
+        // The editing area is drawn as well, holding the book that is filled in next — which is
+        // what stands in it once a batch is over. The file goes in behind `add_files`, which would
+        // read a length off a file that is not there.
+        {
+            let mut rust = self.as_mut().rust_mut();
+            rust.panel.files.push(temp.join(format!("{STEM}-next.m4b")));
+            // The lengths are index-aligned with the files, and nothing was probed.
+            rust.panel_durations.push(None);
         }
         self.as_mut().refresh();
     }
