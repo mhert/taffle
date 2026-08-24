@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Taffle
+Comment=Convert audiobooks into Tonie Audio Format (TAF) files
+Exec=taffle-gui
+Icon=taffle
+Categories=AudioVideo;Audio;
+Terminal=false

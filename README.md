@@ -23,16 +23,23 @@ sha256sum --ignore-missing -c SHA256SUMS
 # macOS ships no sha256sum: shasum -a 256 --ignore-missing -c SHA256SUMS
 ```
 
-**Debian and Ubuntu** — one `.deb` per distro, each linking that distro's own libopus:
+**Debian and Ubuntu** — two packages per distro, each linking that distro's own libopus:
+`taffle-cli` is the command, `taffle-gui` is the window. Install either or both, and take the
+files built for the distro you are on:
 
 ```sh
-sudo apt install ./taffle_<version>_amd64_debian13.deb
+sudo apt install ./taffle-cli_<version>_amd64_debian13.deb
+sudo apt install ./taffle-gui_<version>_amd64_debian13.deb
 ```
 
-**Arch** — the built package, or the `PKGBUILD` beside it to build your own:
+`taffle-cli` takes the place of the `taffle` package earlier releases carried: installing it over
+that one replaces it rather than colliding with it.
+
+**Arch** — the built packages, or the `PKGBUILD` beside them to build your own (it builds both):
 
 ```sh
-sudo pacman -U taffle-<version>-1-x86_64.pkg.tar.zst
+sudo pacman -U taffle-cli-<version>-1-x86_64.pkg.tar.zst
+sudo pacman -U taffle-gui-<version>-1-x86_64.pkg.tar.zst
 ```
 
 **macOS** — a tarball for each architecture, carrying its own libopus, so nothing

@@ -149,8 +149,15 @@ jobs:
           # ca-certificates: the container has none, so the rustup installer's
           # HTTPS download fails with a curl (77) certificate error otherwise.
           # python3: scripts/smoke.sh writes its test WAV with it.
+          # The qt6 dev packages are what taffle-gui's build script compiles its QML module
+          # against; the qml6 modules are what the installed binary imports at run time, which
+          # is what the smoke below exercises.
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential pkg-config libopus-dev python3
+            ca-certificates curl git build-essential pkg-config libopus-dev python3 \
+            qt6-base-dev qt6-declarative-dev qml6-module-qtqml qml6-module-qtquick \
+            qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+            qml6-module-qtquick-templates qml6-module-qtquick-window \
+            qml6-module-qtquick-dialogs
           # gh is not in the distro repos, and the release upload runs inside this
           # container, so install it from GitHub's apt repository.
           install -d -m 0755 /etc/apt/keyrings
@@ -175,27 +182,47 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           . "$HOME/.cargo/env"
-          cargo build --release --locked -p taffle-cli
+          cargo build --release --locked -p taffle-cli -p taffle-gui
+          # Each package is renamed as it is built rather than both afterwards: the two runs
+          # write into the same target/debian, so one glob at the end would see two files.
           cargo deb -p taffle-cli --no-build --deb-version "$VERSION"
-          mv target/debian/*.deb "taffle_${VERSION}_amd64_${{ matrix.tag }}.deb"
-      - name: The package declares the libopus it links
+          mv target/debian/taffle-cli_*.deb "taffle-cli_${VERSION}_amd64_${{ matrix.tag }}.deb"
+          cargo deb -p taffle-gui --no-build --deb-version "$VERSION"
+          mv target/debian/taffle-gui_*.deb "taffle-gui_${VERSION}_amd64_${{ matrix.tag }}.deb"
+      - name: The command-line package declares the libopus it links
         # A package whose $auto silently resolved to nothing installs cleanly and
         # then fails to run, which is the worse failure of the two because it
         # reaches the user rather than the build.
         run: |
-          dpkg -I taffle_*_${{ matrix.tag }}.deb
-          dpkg -I taffle_*_${{ matrix.tag }}.deb | grep -q 'Depends:.*libopus'
-      - name: Install it and convert real audio with it
+          dpkg -I taffle-cli_*_${{ matrix.tag }}.deb
+          dpkg -I taffle-cli_*_${{ matrix.tag }}.deb | grep -q 'Depends:.*libopus'
+      - name: The GUI package declares the Qt it links
+        # Same failure, one library further: the GUI binary is nothing without Qt, so a $auto
+        # that resolved to no Qt at all is a package that installs and then will not start.
         run: |
-          apt-get install -y ./taffle_*_${{ matrix.tag }}.deb
+          dpkg -I taffle-gui_*_${{ matrix.tag }}.deb
+          dpkg -I taffle-gui_*_${{ matrix.tag }}.deb | grep -q 'Depends:.*qt'
+      - name: Install both and put each through its own smoke
+        run: |
+          apt-get install -y ./taffle-cli_*_${{ matrix.tag }}.deb ./taffle-gui_*_${{ matrix.tag }}.deb
           sh scripts/smoke.sh taffle
+          # The frontend's own self-test, run against what the package installed rather than what
+          # the build produced: it boots the whole QML chrome offscreen and exits. The style is
+          # pinned to the one Qt itself ships, as the crate's test run does, so a distro's default
+          # style is not what decides this lane. The bound is the same 30 seconds that test allows
+          # the run, so a boot that never finishes fails here instead of sitting until the job's
+          # own ceiling with nothing said.
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_QUICK_CONTROLS_STYLE=Basic \
+            QT_FORCE_STDERR_LOGGING=1 timeout 30 taffle-gui --smoke
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           if [ "${{ needs.prepare.outputs.is_release }}" != "true" ]; then exit 0; fi
-          gh release upload "v$VERSION" taffle_*_${{ matrix.tag }}.deb --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload "v$VERSION" \
+            taffle-cli_*_${{ matrix.tag }}.deb \
+            taffle-gui_*_${{ matrix.tag }}.deb --repo "${GITHUB_REPOSITORY}" --clobber
       - if: needs.prepare.outputs.is_release != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "deb-${{ matrix.tag }}", path: "*.deb" }
@@ -219,7 +246,9 @@ jobs:
       - name: Toolchain
         # github-cli: the release upload runs inside this container.
         # python: scripts/smoke.sh writes its test WAV with it.
-        run: pacman -Syu --noconfirm base-devel git namcap rust opus python github-cli
+        # qt6-base/qt6-declarative: the PKGBUILD's makedepends. makepkg runs unprivileged here
+        # and cannot install a missing one itself, so they are put in front of it.
+        run: pacman -Syu --noconfirm base-devel git namcap rust opus python github-cli qt6-base qt6-declarative
       - name: Materialize PKGBUILD for this version
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -239,10 +268,15 @@ jobs:
         run: |
           sudo -u builder namcap PKGBUILD || true
           sudo -u builder makepkg -f --skipchecksums --noconfirm
-      - name: Install it and convert real audio with it
+      - name: Install both and put each through its own smoke
+        # One PKGBUILD, two packages: the glob takes whatever makepkg wrote.
         run: |
           pacman -U --noconfirm ./*.pkg.tar.zst
           sh scripts/smoke.sh taffle
+          # The frontend's own self-test against the binary the package installed, bounded and
+          # pinned to Qt's own style for the reasons the deb job states.
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_QUICK_CONTROLS_STYLE=Basic \
+            QT_FORCE_STDERR_LOGGING=1 timeout 30 taffle-gui --smoke
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}

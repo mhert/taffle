@@ -1,33 +1,50 @@
 # Maintainer: mhert <mathias@mh.cx>
-pkgname=taffle
+pkgbase=taffle
+pkgname=(taffle-cli taffle-gui)
 pkgver=1.0.0
 pkgrel=1
 pkgdesc="Convert audiobooks and music into Tonie Audio Format (TAF) files"
 arch=('x86_64')
 url="https://github.com/mhert/taffle"
 license=('MIT')
-depends=('opus')
-makedepends=('rust')
+makedepends=('rust' 'qt6-base' 'qt6-declarative')
 
-# !debug overrides a makepkg default. With `debug` on, makepkg builds with
-# -C debuginfo=2 and (together with `strip`) splits the debug symbols into a
-# separate taffle-debug package. That companion is for maintainers, not end
-# users of a release, so we don't produce it — the main package is still
-# stripped.
-options=(!debug)
+# !lto: with makepkg's lto on, the cc crate compiles cxx-qt's C++ shims as GCC LTO objects,
+# whose symbols rustc's bundled rust-lld cannot see — the GUI link then fails on every
+# cxxbridge symbol those shims define.
+# !debug: with debug on, makepkg builds with -C debuginfo=2 and splits the symbols out into a
+# -debug companion package. That companion is for maintainers rather than for the end users of
+# a release, so it is not produced; the binaries are stripped either way.
+options=(!lto !debug)
 
-source=("$pkgname-$pkgver.tar.gz::https://github.com/mhert/taffle/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgbase-$pkgver.tar.gz::https://github.com/mhert/taffle/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
-  cd "$srcdir/$pkgname-$pkgver"
-  cargo build --release --locked -p taffle-cli
+  cd "$srcdir/$pkgbase-$pkgver"
+  cargo build --release --locked -p taffle-cli -p taffle-gui
 }
 
-package() {
-  cd "$srcdir/$pkgname-$pkgver"
+package_taffle-cli() {
+  pkgdesc="Convert audiobooks and music into Tonie Audio Format (TAF) files (command line)"
+  depends=('opus')
+  # The package this splits out of was named `taffle`; these three retire that name in place.
+  replaces=('taffle')
+  conflicts=('taffle')
+  provides=('taffle')
+  cd "$srcdir/$pkgbase-$pkgver"
   install -Dm755 target/release/taffle "$pkgdir/usr/bin/taffle"
-  # MIT is not one of the licenses /usr/share/licenses/common covers, so the
+  # MIT is not one of the licenses /usr/share/licenses/common covers, so each
   # package has to carry its own copy.
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_taffle-gui() {
+  pkgdesc="Convert audiobooks and music into Tonie Audio Format (TAF) files (Qt GUI)"
+  depends=('opus' 'qt6-base' 'qt6-declarative')
+  cd "$srcdir/$pkgbase-$pkgver"
+  install -Dm755 target/release/taffle-gui "$pkgdir/usr/bin/taffle-gui"
+  install -Dm644 packaging/linux/taffle-gui.desktop "$pkgdir/usr/share/applications/taffle-gui.desktop"
+  install -Dm644 packaging/linux/taffle.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/taffle.svg"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

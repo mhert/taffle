@@ -27,15 +27,21 @@ tempfile = { workspace = true }
 [lints]
 workspace = true
 
-# The binary is named `taffle`, so the package is too — `taffle-cli` is a crate
-# name and would mean nothing to somebody running `apt install`.
+# Two packages rather than one: this is what somebody who only ever runs the command line
+# installs, and it pulls in no Qt. The binary inside is still `taffle` — the split is between
+# packages, not between commands.
 #
 # `depends` is left at cargo-deb's `$auto`, which resolves it with dpkg-shlibdeps
-# against the binary in the distro the package was built in. That is why the two
-# debs are built inside their own distro containers rather than sharing a build:
-# each resolves the libopus package name its own distro uses.
+# against the binary in the distro the package was built in. That is why every deb
+# is built inside its own distro's container rather than sharing one build: each
+# resolves the libopus package name its own distro uses.
 [package.metadata.deb]
-name = "taffle"
+name = "taffle-cli"
+# The shipped package was named `taffle`; these three are Debian's rename protocol, so a user
+# installing this file over that install gets a clean swap rather than a file conflict.
+conflicts = "taffle"
+replaces = "taffle"
+provides = "taffle"
 maintainer = "mhert <mathias@mh.cx>"
 # Without this, cargo-deb writes a /usr/share/doc/taffle/copyright that names no
 # license text at all, and Debian Policy asks every package to carry a verbatim

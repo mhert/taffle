@@ -42,3 +42,21 @@ indexing_slicing = "deny"
 missing_errors_doc = "deny"
 module_name_repetitions = "allow"   # matches the workspace's stated opt-outs
 must_use_candidate = "allow"        # apply #[must_use] by judgement, not blanket
+
+# cargo-deb reads this. Depends stays at $auto: the release job builds inside each distro's own
+# container, so dpkg-shlibdeps resolves that distro's Qt and opus package names — one metadata
+# table is correct for both distros.
+[package.metadata.deb]
+name = "taffle-gui"
+maintainer = "mhert <mathias@mh.cx>"
+# Debian Policy asks every package to carry a verbatim copy of its license, and without this
+# cargo-deb writes a copyright file that names none. The 0 is how many leading lines to skip:
+# none, because the file is license text from its very first line.
+license-file = ["../../LICENSE", "0"]
+section = "sound"
+priority = "optional"
+assets = [
+    ["target/release/taffle-gui", "usr/bin/taffle-gui", "755"],
+    ["../../packaging/linux/taffle-gui.desktop", "usr/share/applications/taffle-gui.desktop", "644"],
+    ["../../packaging/linux/taffle.svg", "usr/share/icons/hicolor/scalable/apps/taffle.svg", "644"],
+]

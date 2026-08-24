@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The one drawing every Taffle icon is made from. The `taffle.ico` and `taffle.icns` beside it are
+  derived from this file by hand and committed as they stand — nothing in the build regenerates
+  them — so rebuild both whenever this drawing changes. Each entry is rendered from the vector
+  rather than resampled from one big raster, which is what keeps the 16 px one readable:
+
+    for s in 16 32 48 64 128 256 512; do rsvg-convert -w $s -h $s taffle.svg -o taffle-$s.png; done
+    magick taffle-16.png taffle-32.png taffle-48.png taffle-256.png taffle.ico
+
+  So `taffle.ico` holds 16, 32, 48 and 256 px, which is what the Windows shell asks for, and
+  `taffle.icns` holds 16, 32, 64, 128, 256 and 512 px as PNG payloads (icp4, icp5, ic12, ic07,
+  ic08, ic09) — png2icns, `iconutil -c icns` over an .iconset, or any writer that keeps those
+  sizes produces it.
+
+  One flat color and no hairline strokes on purpose: the smallest this is ever drawn is a 16 px
+  window icon, where a gradient or a one-pixel stroke turns to mud.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Taffle</title>
+  <rect width="256" height="256" rx="56" fill="#4338ca"/>
+  <path d="M28 76 H104 V104 H80 V180 H52 V104 H28 Z" fill="#ffffff"/>
+  <g fill="none" stroke="#ffffff" stroke-width="22" stroke-linecap="round">
+    <path d="M126 102 Q144 128 126 154"/>
+    <path d="M162 78 Q188 128 162 178"/>
+    <path d="M196 54 Q234 128 196 202"/>
+  </g>
+</svg>
