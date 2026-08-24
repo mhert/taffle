@@ -19,6 +19,12 @@ ColumnLayout {
     // The bridge every field is read off and typed into.
     required property TaffleApp app
 
+    // Where the browse dialog's pick goes: out as the URL the dialog gave, for whoever put this
+    // panel on the screen to turn into a path. It leaves as a URL rather than as the path the
+    // bridge wants because the rule that turns one into the other is written once, in the window
+    // that owns this panel; a copy of it here would be a second rule to keep right.
+    signal outputPicked(url file)
+
     // What is wrong and what is merely worth saying. The palette names neither, so both are named
     // here — the refusal in the red nothing else in the window is, the warning in an amber that
     // says a conversion will still run.
@@ -37,14 +43,7 @@ ColumnLayout {
         fileMode: FileDialog.SaveFile
         defaultSuffix: "taf"
         nameFilters: [qsTr("Tonie audio files") + " (*.taf)"]
-        // What the dialog hands over is a "file://" URL and the bridge takes a plain filesystem
-        // path. The URL is unescaped and the leading slash only a path without a drive letter keeps
-        // is dropped, so "file:///tmp/a.taf" is the path "/tmp/a.taf" and "file:///C:/a.taf" is the
-        // path "C:/a.taf".
-        onAccepted: {
-            const path = decodeURIComponent(outputDialog.selectedFile.toString().replace(/^file:\/\//, ""))
-            panel.app.setOutput(/^\/[A-Za-z]:/.test(path) ? path.substring(1) : path)
-        }
+        onAccepted: panel.outputPicked(outputDialog.selectedFile)
     }
 
     Label {

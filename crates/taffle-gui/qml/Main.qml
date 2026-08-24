@@ -30,20 +30,36 @@ ApplicationWindow {
     // that the whole tree was instantiated and the window came up.
     onAfterAnimating: if (window.app.smokeMode) Qt.exit(0)
 
-    // What a file dialog and a drop hand over is a "file://" URL, and every bridge call takes a
-    // plain filesystem path; QML has no call of its own that turns the one into the other. The URL
-    // is unescaped and the leading slash only a path without a drive letter keeps is dropped, so
-    // "file:///tmp/a.mp3" is the path "/tmp/a.mp3" and "file:///C:/a.mp3" is the path "C:/a.mp3".
+    // What a file dialog and a drop hand over is a URL, and every bridge call takes a plain
+    // filesystem path; QML has no call of its own that turns the one into the other. This is the
+    // only place in the window that does it, so the dialogs and the panel beside them all hand
+    // their URLs here. Only a "file://" URL names something this machine can open, so anything
+    // else — a browser's http:// drop, a trash:// entry — has no path at all and comes back empty
+    // for the caller to leave out. What is left is unescaped: a URL with no host is its own path
+    // ("file:///tmp/a.mp3" is "/tmp/a.mp3"), a URL with a host keeps it as a UNC path
+    // ("file://box/share/a.mp3" is "//box/share/a.mp3"), and the leading slash only a path without
+    // a drive letter keeps is dropped ("file:///C:/a.mp3" is "C:/a.mp3").
     function localPath(url) {
-        const path = decodeURIComponent(url.toString().replace(/^file:\/\//, ""))
+        const text = url.toString()
+        if (!text.startsWith("file://"))
+            return ""
+        // Whether a third slash follows the two is what says the URL names no host, and the
+        // unescaping comes after that reading so an escaped slash in a name cannot pose as one.
+        const rest = text.substring("file://".length)
+        const path = decodeURIComponent(rest.startsWith("/") ? rest : "//" + rest)
         return /^\/[A-Za-z]:/.test(path) ? path.substring(1) : path
     }
 
-    // What addFiles reads: one plain path per line, in the order they were handed over.
+    // What addFiles reads: one plain path per line, in the order they were handed over. A URL that
+    // names no local file is left out rather than passed on as if it were a path, so a drop that
+    // carries nothing openable adds nothing.
     function localPaths(urls) {
         let lines = []
-        for (let at = 0; at < urls.length; ++at)
-            lines.push(window.localPath(urls[at]))
+        for (let at = 0; at < urls.length; ++at) {
+            const path = window.localPath(urls[at])
+            if (path !== "")
+                lines.push(path)
+        }
         return lines.join("\n")
     }
 
@@ -229,6 +245,7 @@ ApplicationWindow {
 
             OptionsPanel {
                 app: window.app
+                onOutputPicked: file => window.app.setOutput(window.localPath(file))
                 Layout.fillHeight: true
                 // A third of the window, and no more: a layout inside a layout would otherwise be
                 // handed every pixel the column beside it does not ask for, and the queue and the
