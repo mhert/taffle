@@ -11,9 +11,14 @@
 //! through block by block and hashed on the way, so that what a frontend shows has been checked
 //! rather than believed.
 //!
-//! [`duration`] is the one thing here that touches no file: the grammar a length of audio is typed
-//! in and the clock it is shown back on. It sits below the frontends rather than in one of them, so
-//! that all of them read and write a duration the same way.
+//! [`duration`] touches no file: the grammar a length of audio is typed in and the clock it is
+//! shown back on. It sits below the frontends rather than in one of them, so that all of them read
+//! and write a duration the same way.
+//!
+//! [`refuse_collisions`], [`planned_chapters`] and [`MAX_CHAPTERS`] are here for that same reason:
+//! what a frontend settles before it converts anything — jobs that would write over what they read
+//! or over each other, a chapter list longer than a box plays — is settled once here, so that every
+//! frontend refuses and warns about the same things.
 //!
 //! # A frontend depends on this crate and no other
 //!
@@ -38,6 +43,7 @@
 //! here writes, a directory that refuses the file — comes back in [`JobOutcome::cover_error`] with
 //! the conversion's own report beside it, and never as an [`Err`].
 
+mod collision;
 mod cover;
 mod inspect;
 mod output;
@@ -50,6 +56,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use taf_encode::{convert, Input};
 
+pub use collision::{refuse_collisions, CollisionError};
 pub use inspect::{inspect, read_through, ChapterRead, InspectError, Inspection};
 pub use output::default_output_path;
 
@@ -197,6 +204,27 @@ pub enum JobError {
     Convert(#[from] ConvertError),
 }
 
+/// The chapters a Toniebox plays, as `FORMAT.md` states it from teddycloud's own limit.
+///
+/// A longer list is a warning and not a refusal: what a box does with the hundredth chapter is the
+/// box's business, everything else that reads a TAF reads the whole of it, and a file that took an
+/// hour to convert is not thrown away over a device that is not here.
+pub const MAX_CHAPTERS: usize = 99;
+
+/// How many chapters a stated plan comes to, where the caller stated one.
+///
+/// A TAF's first chapter begins where its audio does, so a plan that does not begin at the start of
+/// it has that chapter put in front of it — one chapter more than was typed.
+#[must_use]
+pub fn planned_chapters(mode: &ChapterMode) -> Option<usize> {
+    let ChapterMode::Explicit(offsets) = mode else {
+        return None;
+    };
+    let opening = usize::from(offsets.first() != Some(&0));
+
+    Some(offsets.len() + opening)
+}
+
 /// The inputs of `paths`, opened in the order they play.
 ///
 /// What each of them is called is the path the caller stated, in full: it is what a failure of that
@@ -234,4 +262,19 @@ fn clock_audio_id() -> AudioId {
     let truncated = seconds as u32;
 
     AudioId::new(truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{planned_chapters, ChapterMode};
+
+    #[test]
+    fn a_plan_that_skips_the_start_gains_the_opening_chapter() {
+        assert_eq!(
+            planned_chapters(&ChapterMode::Explicit(vec![0, 100])),
+            Some(2)
+        );
+        assert_eq!(planned_chapters(&ChapterMode::Explicit(vec![100])), Some(2));
+        assert_eq!(planned_chapters(&ChapterMode::Auto), None);
+    }
 }

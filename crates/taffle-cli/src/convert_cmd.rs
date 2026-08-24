@@ -8,24 +8,17 @@
 //! box plays, a cover that could not be written — goes to stderr, because none of it is the answer
 //! to what was asked.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use taffle::duration::{clock, RATE};
 use taffle::{
-    default_output_path, run_convert, ChapterError, ChapterMode, Conversion, ConvertError,
-    ConvertJob, JobError, JobOutcome, Progress, SilenceOpts,
+    default_output_path, planned_chapters, refuse_collisions, run_convert, ChapterError,
+    ChapterMode, Conversion, ConvertError, ConvertJob, JobError, JobOutcome, Progress, SilenceOpts,
+    MAX_CHAPTERS,
 };
 
 use crate::cli::ConvertArgs;
-
-/// The chapters a Toniebox plays, as `FORMAT.md` states it from teddycloud's own limit.
-///
-/// A longer list is a warning and not a refusal: what a box does with the hundredth chapter is the
-/// box's business, everything else that reads a TAF reads the whole of it, and a file that took an
-/// hour to convert is not thrown away over a device that is not here.
-const MAX_CHAPTERS: usize = 99;
 
 /// Converts the files `args` names, and says what came of it.
 ///
@@ -34,7 +27,11 @@ const MAX_CHAPTERS: usize = 99;
 /// If the output is one of the inputs, or if the conversion itself failed — an input that could not
 /// be read, a file that could not be written, a chapter list that is no plan.
 pub fn run(args: ConvertArgs) -> Result<()> {
-    let job = job(args)?;
+    let job = job(args);
+
+    // A command line states one conversion, and it is held against itself while there is still
+    // nothing on the disk to undo.
+    refuse_collisions(std::slice::from_ref(&job))?;
 
     // The chapter count is said once, where it first stands: a plan somebody typed is settled in
     // front of the audio, so saying it there is a chance to stop the run rather than something
@@ -65,12 +62,8 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     Ok(())
 }
 
-/// The job `args` states, with the output resolved and held against the inputs.
-///
-/// # Errors
-///
-/// If the output is one of the inputs.
-fn job(args: ConvertArgs) -> Result<ConvertJob> {
+/// The job `args` states, with the output resolved.
+fn job(args: ConvertArgs) -> ConvertJob {
     let ConvertArgs {
         inputs,
         output,
@@ -84,9 +77,8 @@ fn job(args: ConvertArgs) -> Result<ConvertJob> {
     } = args;
 
     let output = output.or_else(|| inputs.first().map(|first| default_output_path(first)));
-    refuse_collision(&inputs, output.as_ref())?;
 
-    Ok(ConvertJob {
+    ConvertJob {
         inputs,
         output,
         options: Conversion {
@@ -108,30 +100,7 @@ fn job(args: ConvertArgs) -> Result<ConvertJob> {
             workers: None,
         },
         write_cover: !no_cover,
-    })
-}
-
-/// Refuses a conversion that would write into a file it is reading.
-///
-/// The output is created by emptying whatever is at its name, and an input that *is* that file
-/// would then be read out of the file being written. Both lists are in hand before anything is
-/// opened, so this is settled while there is still nothing on the disk to undo.
-///
-/// The paths are compared as they were typed: two names for one file — a symbolic link, a
-/// directory reached another way — are two names here, and the conversion runs.
-///
-/// # Errors
-///
-/// If any input is the output.
-fn refuse_collision(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> {
-    let Some(clash) = inputs.iter().find(|input| Some(*input) == output) else {
-        return Ok(());
-    };
-
-    bail!(
-        "the output {} is one of the inputs: converting it would write over the audio being read",
-        clash.display()
-    );
+    }
 }
 
 /// A chapter that lies past the end of the audio, said in the clock it was typed in.
@@ -168,19 +137,6 @@ fn in_clock_time(error: JobError) -> anyhow::Error {
 /// Where `frames` of a conversion's audio lie, on a clock.
 fn at_clock(frames: u64) -> String {
     clock(Duration::from_secs(frames / u64::from(RATE)))
-}
-
-/// How many chapters a stated plan comes to, where the caller stated one.
-///
-/// A TAF's first chapter begins where its audio does, so a plan that does not begin at the start of
-/// it has that chapter put in front of it — one chapter more than was typed.
-fn planned_chapters(mode: &ChapterMode) -> Option<usize> {
-    let ChapterMode::Explicit(offsets) = mode else {
-        return None;
-    };
-    let opening = usize::from(offsets.first() != Some(&0));
-
-    Some(offsets.len() + opening)
 }
 
 /// Says so where `chapters` is more of them than a box plays.
