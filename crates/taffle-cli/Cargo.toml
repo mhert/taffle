@@ -43,7 +43,7 @@ conflicts = "taffle"
 replaces = "taffle"
 provides = "taffle"
 maintainer = "mhert <mathias@mh.cx>"
-# Without this, cargo-deb writes a /usr/share/doc/taffle/copyright that names no
+# Without this, cargo-deb writes a /usr/share/doc/taffle-cli/copyright that names no
 # license text at all, and Debian Policy asks every package to carry a verbatim
 # copy of its license. The path is relative to this crate, so it climbs to the
 # workspace root; nothing is skipped because the file is license text from its
