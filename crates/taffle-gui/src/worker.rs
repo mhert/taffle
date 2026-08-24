@@ -5,15 +5,6 @@
 //! only ever hears about it through [`Event`]. So how a batch schedules, stops and tidies up is
 //! held by ordinary unit tests rather than by somebody clicking.
 
-// The chrome that starts a batch arrives with the run it drives, and `pub` keeps nothing alive in
-// a binary crate — so outside the tests below, every item here is still unreached. Stated as an
-// expectation rather than an allow: the day the chrome does run a batch, the expectation goes
-// unfulfilled and the build says so, and this attribute leaves with the wait it stands for.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the chrome that runs a batch comes with the run")
-)]
-
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;

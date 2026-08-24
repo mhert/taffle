@@ -11,15 +11,6 @@
 //! Every duration here is read by [`Seconds`], which is the grammar the command line takes its own
 //! times in: one grammar for the whole of taffle, rather than one per frontend.
 
-// The chrome that calls all of this arrives with the dialog it serves, and `pub` keeps nothing
-// alive in a binary crate — so outside the tests below, every item here is still unreached. Stated
-// as an expectation rather than an allow: the day the chrome does call it, the expectation goes
-// unfulfilled and the build says so, and this attribute leaves with the wait it stands for.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the chrome that calls this comes with the dialog")
-)]
-
 use std::path::PathBuf;
 
 use taffle::duration::Seconds;
