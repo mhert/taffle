@@ -1,3 +1,15 @@
+# cargo-mutants scope: the full mutation gate applies to the crates whose behaviour is decidable
+# without a window or a platform toolkit — taf, taf-encode, taffle, taffle-cli.
+#
+# What the excluded crate is gated by instead, stated as what actually exists:
+#
+# - taffle-gui: a headless `--smoke` self-test that boots the whole QML chrome under the
+#   offscreen platform, drives a fake batch through the bridge and model, and fails on any QML
+#   diagnostic. It runs in `cargo test -p taffle-gui` on every OS lane and against the installed
+#   package in every release lane. What remains in the crate outside the worker's and plan's
+#   ordinary unit tests is chrome: QObject wiring and QML, none of it constructible off Qt.
+exclude_globs = ["crates/taffle-gui/**"]
+
 # The mutants no test can ever kill, each one named on its own.
 #
 # CI gates that every mutant of the code a branch changes dies, so a mutant that is either the same
