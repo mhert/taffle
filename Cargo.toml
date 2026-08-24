@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/taf", "crates/taf-encode", "crates/taffle", "crates/taffle-cli"]
+members = ["crates/taf", "crates/taf-encode", "crates/taffle", "crates/taffle-cli", "crates/taffle-gui"]
 
 [workspace.package]
 version = "1.0.0"
@@ -17,6 +17,12 @@ thiserror = "2"
 anyhow = "1"
 sha1 = "0.10"
 tempfile = "3"
+# taffle-gui's Qt6/QML integration: the bridge macro crate, the Qt type wrappers, and the
+# build-time C++/moc/qrc glue. qt_full = QtGui + QtQml + QtQuickControls wrappers only.
+cxx = "1"
+cxx-qt = "0.9"
+cxx-qt-lib = { version = "0.9", default-features = false, features = ["qt_full"] }
+cxx-qt-build = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

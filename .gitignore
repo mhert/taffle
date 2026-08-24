@@ -4,3 +4,6 @@ plans/
 specs/
 .superpowers/
 .claude/
+# cxx-qt-build writes this qmlls config next to the crate it builds, with an absolute buildDir
+# that is only true of the checkout it was generated in.
+.qmlls.ini
