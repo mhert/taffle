@@ -27,7 +27,9 @@ use taf::digest::Sha1;
 use taf::header::{HeaderView, BLOCK_LEN};
 use taf::reader::{Summary, Validator};
 use taf_encode::{ChapterError, Conversion, ConvertError, Progress};
-use taffle::{default_output_path, run_convert, ConvertJob, JobError, JobOutcome};
+use taffle::{
+    default_output_path, probe_duration, run_convert, ConvertJob, JobError, JobOutcome, ProbeError,
+};
 use tempfile::TempDir;
 
 /// The audiobook every conversion here runs on: 10 seconds of AAC in an MP4, two chapters, and a
@@ -446,4 +448,23 @@ fn a_job_of_no_inputs_is_the_engine_s_own_refusal_and_no_file_is_made_for_it() {
     assert_eq!(error.to_string(), "no inputs");
     assert!(!taf_path.exists(), "an output was made for an empty job");
     assert!(progress.is_empty());
+}
+
+#[test]
+fn a_book_states_how_long_it_plays_without_being_converted() {
+    let duration = probe_duration(&fixture(BOOK)).expect("the book states its length");
+
+    // The ten seconds the book was authored with, read off the headers of the file at that path.
+    // What the container states down to the nanosecond is pinned where the probe itself is tested.
+    assert_eq!(duration.as_secs(), 10, "got {duration:?}");
+}
+
+#[test]
+fn a_path_that_is_not_there_states_no_length() {
+    let dir = TempDir::new().expect("a directory of its own");
+
+    let error = probe_duration(&dir.path().join("Nothing.m4b")).expect_err("there is no such file");
+
+    assert!(matches!(error, ProbeError::Io(_)), "{error:?}");
+    assert_eq!(error.to_string(), "reading the input failed");
 }

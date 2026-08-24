@@ -20,6 +20,10 @@
 //! or over each other, a chapter list longer than a box plays — is settled once here, so that every
 //! frontend refuses and warns about the same things.
 //!
+//! [`probe_duration`] barely touches a file: how long it states it plays, read off its headers and
+//! without decoding a packet of it, so that a frontend can show the length of what it is about to
+//! convert before it converts any of it.
+//!
 //! # A frontend depends on this crate and no other
 //!
 //! What these workflows hand back is made of `taf-encode`'s types and `taf`'s, so those are
@@ -51,8 +55,8 @@ mod output;
 pub mod duration;
 
 use std::fs::File;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taf_encode::{convert, Input};
 
@@ -67,7 +71,7 @@ pub use taf::id::{AudioId, BlockIndex};
 pub use taf::reader::ValidateError;
 pub use taf_encode::{
     ChapterError, ChapterMode, ChapterOut, Conversion, ConversionReport, ConvertError, Cover,
-    Progress, SilenceOpts,
+    ProbeError, Progress, SilenceOpts,
 };
 
 /// A conversion of files on disk: what goes in, where it comes out, and what is done to the audio
@@ -202,6 +206,25 @@ pub enum JobError {
     /// The conversion itself failed.
     #[error(transparent)]
     Convert(#[from] ConvertError),
+}
+
+/// How long the file at `path` states it plays, without converting any of it.
+///
+/// This is the number a queue row shows and a percent bar counts against, read off the container's
+/// headers: no audio is decoded, so a shelf of books costs file opens. What comes back is what the
+/// file claims about itself — the conversion's own report stays the truth about the audio that was
+/// written.
+///
+/// # Errors
+///
+/// [`ProbeError::Io`] if the file cannot be opened, and whatever
+/// [`taf_encode::probe_duration()`] makes of its bytes otherwise: [`ProbeError::Unrecognized`] for
+/// a file that is no container this build reads, [`ProbeError::NoDuration`] for one that states no
+/// length.
+pub fn probe_duration(path: &Path) -> Result<Duration, ProbeError> {
+    let file = File::open(path)?;
+
+    taf_encode::probe_duration(Box::new(file))
 }
 
 /// The chapters a Toniebox plays, as `FORMAT.md` states it from teddycloud's own limit.

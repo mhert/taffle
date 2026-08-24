@@ -5,6 +5,9 @@
 //! and a finished file comes out of the other end. Everything else here is one stage of that, and
 //! public because a stage is worth having on its own.
 //!
+//! [`probe_duration()`] is beside all of that rather than a part of it: how long an input states it
+//! plays, read off its headers, for a caller that wants a length before it wants a conversion.
+//!
 //! # The shape a conversion runs in
 //!
 //! The inputs are read once, in the order they were handed in, by one reader — nothing here rewinds
@@ -36,6 +39,7 @@ pub mod convert;
 pub mod decode;
 mod encode;
 pub mod pcm;
+mod probe;
 mod produce;
 
 pub use opus;
@@ -50,3 +54,4 @@ pub use decode::{
     open_source, AudioSource, Cover, DecodeError, SourceChapter, SourceMetadata, SourceSpec,
 };
 pub use pcm::{Pcm48, PcmError, SilenceOpts, SilenceProcessor, SILENCE_THRESHOLD};
+pub use probe::{probe_duration, ProbeError};
