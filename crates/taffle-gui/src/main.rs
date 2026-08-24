@@ -109,15 +109,27 @@ mod tests {
         assert!(args(&["--frobnicate"]).is_err(), "unknown flag");
     }
 
-    /// Every name `dir` holds, sorted — what a run is held to leaving unchanged.
-    fn listing(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
-        let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(dir)
+    /// Everything `dir` holds, sorted: every name in it, with how big what stands under it is and
+    /// when it was last written — what a run is held to leaving unchanged.
+    ///
+    /// The names alone would say nothing about a file rewritten where it stands, which is how a
+    /// run could damage the tree it was started in without adding anything to it.
+    fn listing(dir: &std::path::Path) -> Vec<(std::ffi::OsString, u64, std::time::SystemTime)> {
+        let mut held: Vec<_> = std::fs::read_dir(dir)
             .expect("listing the directory the smoke run is started in")
-            .map(|entry| entry.expect("an entry of it").file_name())
+            .map(|entry| {
+                let entry = entry.expect("an entry of it");
+                let about = entry.metadata().expect("what the name stands for");
+                (
+                    entry.file_name(),
+                    about.len(),
+                    about.modified().expect("when it was last written"),
+                )
+            })
             .collect();
-        names.sort();
+        held.sort();
 
-        names
+        held
     }
 
     /// End-to-end QML smoke test: boots the real binary under Qt's `offscreen` platform in
@@ -188,8 +200,9 @@ mod tests {
             binary.display()
         );
 
-        // Nothing of the conversion is real, so nothing of it may land on a disk: the run is
-        // held to leaving the directory it was started in exactly as it found it.
+        // Nothing of the conversion is real, so nothing of it may land on a disk: the run is held
+        // to adding nothing to the directory it was started in, taking nothing out of it and
+        // rewriting nothing that stands in it.
         let started_in = std::env::current_dir().expect("the directory the test runs in");
         let before = listing(&started_in);
 
@@ -258,7 +271,7 @@ mod tests {
         assert_eq!(
             listing(&started_in),
             before,
-            "the smoke run left something behind in {}",
+            "the smoke run changed what stands in {}",
             started_in.display()
         );
     }
