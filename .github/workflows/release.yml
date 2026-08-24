@@ -355,7 +355,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "macos-${{ matrix.arch }}", path: "taffle-*-macos.tar.gz" }
 
-  # Windows: one build feeds both the portable zip and the installer.
+  # Windows: one build feeds four artifacts — a portable zip and an installer for
+  # each of the two programs.
   windows:
     needs: prepare
     runs-on: windows-2025
@@ -370,14 +371,29 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.ref || github.sha }}
       - run: rustup show
-      - run: cargo build --release --locked -p taffle-cli
-      - name: Stage
+      - name: Install Qt 6.7.2 via aqt
+        shell: pwsh
+        # Qt's own binaries rather than anything the runner ships: the frontend's build script
+        # compiles its QML module against them, and windeployqt below bundles them. 6.7.2 ships
+        # a win64_msvc2019_64 build and no 2022 one; the runner's MSVC 2022 compiles the C++
+        # shims against it, the two share an ABI. Windows reads no rpath, so Qt's DLLs are found
+        # through PATH — and that entry has to be a native path, which is why this step is
+        # PowerShell rather than bash.
+        run: |
+          pipx install aqtinstall
+          aqt install-qt windows desktop 6.7.2 win64_msvc2019_64 -O "$HOME\Qt"
+          $qt = (Get-ChildItem -Directory "$HOME\Qt\6.7.2")[0].FullName
+          Add-Content -Path $env:GITHUB_PATH -Value "$qt\bin"
+          Add-Content -Path $env:GITHUB_ENV -Value "QMAKE=$qt\bin\qmake6.exe"
+          Add-Content -Path $env:GITHUB_ENV -Value "QT_BIN=$qt\bin"
+      - run: cargo build --release --locked -p taffle-cli -p taffle-gui
+      - name: Stage the command line
         shell: bash
         run: |
           mkdir -p stage
           cp target/release/taffle.exe stage/taffle.exe
           cp LICENSE README.md stage/
-      - name: The binary is self-contained
+      - name: The command-line binary is self-contained
         shell: bash
         # crt-static (.cargo/config.toml) folds the MSVC runtime into the .exe.
         # Prove it held: a dynamically-linked binary names VCRUNTIME140.dll in its
@@ -385,6 +401,10 @@ jobs:
         # install lacks. This runner has the VC++ redistributable installed, so
         # launching the binary here would succeed even after a regression;
         # scanning the imports is what catches it.
+        #
+        # Only the command line is held to this. The window links Qt as DLLs by design — the
+        # Qt build it compiles against ships no static libraries — so it carries a copy of
+        # them beside it, and is proven the other way below: installed, then started.
         run: |
           if grep -aiq 'VCRUNTIME140' stage/taffle.exe; then
             echo "::error::taffle.exe still dynamically links the MSVC runtime (VCRUNTIME140.dll)"
@@ -394,12 +414,33 @@ jobs:
       - name: Convert real audio with the staged binary
         shell: bash
         run: sh scripts/smoke.sh ./stage/taffle.exe
+      - name: Stage the window and let windeployqt bundle the Qt it needs
+        shell: bash
+        # windeployqt reads the binary's imports for the Qt libraries and copies them in beside
+        # it, together with the plugins Qt loads by name rather than by import. What it cannot
+        # read off a binary is QML: the chrome's modules are compiled into the executable as
+        # resources, so --qmldir points it at the same QML sources the build compiled and it
+        # learns from their import lines which QtQuick modules and style plugins to bundle.
+        # --no-translations because nothing here is translated: Qt's catalogs would be
+        # megabytes of nothing.
+        run: |
+          mkdir -p stage-gui
+          cp target/release/taffle-gui.exe stage-gui/taffle-gui.exe
+          cp LICENSE README.md stage-gui/
+          windeployqt --qmldir crates/taffle-gui/qml --no-translations stage-gui/taffle-gui.exe
       - name: Zip
         shell: bash
+        # Each archive is named for the package it carries, and each installer for the package
+        # it installs, so the four Windows files on a release page say which is which. Only the
+        # names changed for the command line: its installer still writes the same directory and
+        # the same registry key, so a machine carrying an earlier release upgrades in place
+        # rather than gaining a second copy.
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: cd stage && 7z a "../taffle-$VERSION-x86_64-windows.zip" .
-      - name: Build installer
+        run: |
+          (cd stage && 7z a "../taffle-cli-$VERSION-x86_64-windows.zip" .)
+          (cd stage-gui && 7z a "../taffle-gui-$VERSION-x86_64-windows.zip" .)
+      - name: Build both installers
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -411,7 +452,8 @@ jobs:
           # -NOCD: makensis otherwise cd's to the script's directory, so the
           # relative File "stage\..." paths would resolve under packaging/windows.
           "/c/Program Files (x86)/NSIS/makensis.exe" -NOCD -DVERSION="$VERSION" packaging/windows/installer.nsi
-      - name: Install with the installer and prove it did what it claims
+          "/c/Program Files (x86)/NSIS/makensis.exe" -NOCD -DVERSION="$VERSION" packaging/windows/installer-gui.nsi
+      - name: Install the command line with its installer and prove it did what it claims
         shell: pwsh
         # A quoting mistake in the installer script yields an installer that builds
         # and runs cleanly while its PATH edit does nothing at all, so the only way
@@ -419,10 +461,35 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          Start-Process -Wait "taffle-$env:VERSION-x86_64-setup.exe" -ArgumentList "/S"
+          Start-Process -Wait "taffle-cli-$env:VERSION-x86_64-setup.exe" -ArgumentList "/S"
           $p = [Environment]::GetEnvironmentVariable('Path','Machine')
           if ($p -notlike "*taffle*") { throw "the installer did not put taffle on the machine PATH" }
           & "$env:ProgramFiles\taffle\taffle.exe" --version
+      - name: Install the window with its installer and put it through its own smoke
+        shell: pwsh
+        # The window is proven the only way a bundled Qt tree can be: install it and start it.
+        # The self-test boots the whole chrome, drives a fake batch through it and exits, so a
+        # library or a QML module windeployqt did not bundle fails here rather than on the first
+        # user's machine — and it is run against what the installer left in Program Files, never
+        # the staged tree it was built from.
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          Start-Process -Wait "taffle-gui-$env:VERSION-x86_64-setup.exe" -ArgumentList "/S"
+          $key = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\taffle-gui"
+          if (-not (Test-Path $key)) { throw "the installer wrote no uninstall entry, so Settings > Apps would not list the install" }
+          # This job put Qt's own bin directory on PATH to build against. Leaving it there would
+          # let a DLL the installer never laid down be found in that install instead, and the
+          # run would pass on a machine no user has.
+          $env:PATH = (($env:PATH -split ';') | Where-Object { $_ -ne $env:QT_BIN }) -join ';'
+          # No display server and a software scene graph, the pair the crate's own smoke test
+          # puts on the run. The Qt Quick Controls style is left at whatever the platform picks,
+          # where that test pins it to Basic: which style Windows resolves to is part of what
+          # windeployqt had to bundle, and pinning Basic would pass with it missing.
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:QT_QUICK_BACKEND = "software"
+          & "$env:ProgramFiles\taffle-gui\taffle-gui.exe" --smoke
+          if ($LASTEXITCODE -ne 0) { throw "the installed window failed its own self-test (exit $LASTEXITCODE)" }
       - name: Upload
         shell: bash
         env:
@@ -431,8 +498,10 @@ jobs:
         run: |
           if [ "${{ needs.prepare.outputs.is_release }}" != "true" ]; then exit 0; fi
           gh release upload "v$VERSION" \
-            "taffle-$VERSION-x86_64-windows.zip" \
-            "taffle-$VERSION-x86_64-setup.exe" --repo "${GITHUB_REPOSITORY}" --clobber
+            "taffle-cli-$VERSION-x86_64-windows.zip" \
+            "taffle-cli-$VERSION-x86_64-setup.exe" \
+            "taffle-gui-$VERSION-x86_64-windows.zip" \
+            "taffle-gui-$VERSION-x86_64-setup.exe" --repo "${GITHUB_REPOSITORY}" --clobber
       - if: needs.prepare.outputs.is_release != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: windows, path: "taffle-*-x86_64-*" }

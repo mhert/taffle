@@ -3,7 +3,11 @@
 !endif
 
 Name "taffle"
-OutFile "taffle-${VERSION}-x86_64-setup.exe"
+; The output file is named for the distribution package, `taffle-cli`, so that the two Windows
+; installers on a release page tell themselves apart. Everything below keeps the name the
+; program has always carried on the machine, which is what lets an older install be upgraded
+; rather than doubled.
+OutFile "taffle-cli-${VERSION}-x86_64-setup.exe"
 InstallDir "$PROGRAMFILES64\taffle"
 RequestExecutionLevel admin
 

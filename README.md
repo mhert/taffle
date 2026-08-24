@@ -55,9 +55,15 @@ That leaves `taffle/` holding the license and the readme, to keep or delete as y
 like. The binaries are unsigned, so Gatekeeper will hold one back on first run:
 `sudo xattr -c /usr/local/bin/taffle` clears it.
 
-**Windows** — `taffle-<version>-x86_64-setup.exe` installs the binary and puts it on
-PATH; `taffle-<version>-x86_64-windows.zip` is the same binary to unpack wherever you
-like. The installer is unsigned, so SmartScreen will warn on first run.
+**Windows** — two installers, one per program. `taffle-gui-<version>-x86_64-setup.exe`
+is the window, and the one to take if you would rather click than type: it carries the
+Qt it needs and leaves a `Taffle` entry in the Start menu.
+`taffle-cli-<version>-x86_64-setup.exe` installs the command and puts it on PATH. Each
+has a zip beside it — `taffle-gui-<version>-x86_64-windows.zip` and
+`taffle-cli-<version>-x86_64-windows.zip` — holding the same files to unpack wherever
+you like. The command-line files were named `taffle-<version>-…` in earlier releases;
+what the installer puts on the machine has not moved, so it upgrades in place. Both
+installers are unsigned, so SmartScreen will warn on first run.
 
 ### From source
 

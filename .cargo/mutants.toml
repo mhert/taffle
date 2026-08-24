@@ -8,9 +8,9 @@
 #   diagnostic. It runs inside the `cargo test --workspace` of all four OS lanes — Linux, both
 #   macOS runners and Windows — each of which installs a Qt for exactly that, and once more in
 #   every release lane that ships the GUI: the Debian, Ubuntu and Arch packages are installed and
-#   the same self-test is run against the binary they put on the machine. What remains in the
-#   crate outside the worker's and plan's ordinary unit tests is chrome: QObject wiring and QML,
-#   none of it constructible off Qt.
+#   the Windows installer is run, and the same self-test is put to the binary each of them left on
+#   the machine. What remains in the crate outside the worker's and plan's ordinary unit tests is
+#   chrome: QObject wiring and QML, none of it constructible off Qt.
 exclude_globs = ["crates/taffle-gui/**"]
 
 # The mutants no test can ever kill, each one named on its own.
