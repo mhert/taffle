@@ -184,7 +184,10 @@ impl AudioSource for SymphoniaSource {
 /// an audio track and a track it does not know is not one — the cover picture and the chapter text
 /// an m4b carries as tracks of their own among them. Taking the first such track rather than the
 /// container's first track is what keeps those from being mistaken for the book.
-fn audio_track(tracks: &[Track]) -> Option<&Track> {
+///
+/// This is the crate's one answer to which track of a container is the book: the duration probe
+/// asks it too, so that the file a length is stated for is the file a conversion goes on to read.
+pub(crate) fn audio_track(tracks: &[Track]) -> Option<&Track> {
     tracks
         .iter()
         .find(|track| get_codecs().get_codec(track.codec_params.codec).is_some())

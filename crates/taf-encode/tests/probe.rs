@@ -21,6 +21,15 @@ use taf_encode::{probe_duration, ProbeError};
 /// divide out dropped.
 const M4B_STATED: Duration = Duration::new(10, 23_219_954);
 
+/// How long the audio in [`fixtures::VIDEO_FIRST_MP4`] states it plays, to the nanosecond.
+///
+/// The same clockwork as [`M4B_STATED`] over the second of mono this fixture's audio track carries:
+/// [`fixtures::SAMPLE_RATE`] frames of tone with one [`fixtures::AAC_FRAME`] of priming in front of
+/// them, which symphonia's MP4 demuxer counts rather than trimming. Which is 45 124 / 44 100
+/// seconds — 1 second and 23 219 954 nanoseconds, with the same 28 600 that do not divide out
+/// dropped.
+const VIDEO_FIRST_STATED: Duration = Duration::new(1, 23_219_954);
+
 #[test]
 fn the_probe_states_the_length_the_container_states() {
     let duration =
@@ -44,12 +53,23 @@ fn an_mp3_states_the_tone_without_the_padding_its_encoder_added() {
 }
 
 #[test]
-fn a_container_whose_first_track_is_no_recording_states_no_length() {
-    // A container states a rate for the audio it carries and for nothing else, and the track this
-    // one leads with is video: there is nothing in front to count frames at, and the probe says
-    // so rather than digging for a track further back.
-    let error = probe_duration(Box::new(Cursor::new(fixtures::VIDEO_FIRST_MP4)))
-        .expect_err("the track it leads with states no rate");
+fn a_track_of_video_ahead_of_the_audio_is_not_the_one_a_length_is_stated_from() {
+    let duration = probe_duration(Box::new(Cursor::new(fixtures::VIDEO_FIRST_MP4)))
+        .expect("the audio track states a length");
+
+    // This container leads with a track of video and carries its audio behind it, and a conversion
+    // takes the first track it has a decoder for. Counting the frames of the container's first
+    // track instead would state no length at all for a file that converts perfectly well.
+    assert_eq!(duration, VIDEO_FIRST_STATED);
+}
+
+#[test]
+fn a_container_of_no_audio_at_all_states_no_length() {
+    // An MP4 of one video track and nothing else: no track in it is a recording, so there is
+    // nothing here whose frames a length could be counted from — the same file a conversion finds
+    // nothing to decode in.
+    let error = probe_duration(Box::new(Cursor::new(fixtures::NO_AUDIO_MP4)))
+        .expect_err("no track of audio");
 
     assert!(matches!(error, ProbeError::NoDuration), "{error:?}");
     assert_eq!(error.to_string(), "the container states no duration");

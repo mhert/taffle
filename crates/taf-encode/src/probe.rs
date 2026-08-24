@@ -10,6 +10,8 @@ use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptio
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::decode::symphonia::audio_track;
+
 /// Why no duration could be stated.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -34,7 +36,7 @@ pub enum ProbeError {
 /// [`ProbeError::Unrecognized`] for bytes no demuxer here claims, which is what an input that
 /// cannot be read at all comes back as too: a source that gives nothing up looks exactly like one
 /// holding no format. [`ProbeError::NoDuration`] where a container was read and states no length —
-/// no track, no frame count, or no rate to count the frames at.
+/// no track of audio in it, no frame count, or no rate to count the frames at.
 pub fn probe_duration(source: Box<dyn MediaSource>) -> Result<Duration, ProbeError> {
     let stream = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
     // The setup a decoder opens an input with: the bytes decide what it is, and the padding an
@@ -52,17 +54,15 @@ pub fn probe_duration(source: Box<dyn MediaSource>) -> Result<Duration, ProbeErr
         )
         .map_err(|_| ProbeError::Unrecognized)?;
 
-    // The track the container leads with, which in an audiobook is the book. Nothing here searches
-    // a file for a recording: what is stated is what the header out in front states, and a
-    // container leading with something else is one this says nothing about.
-    let track = probed
-        .format
-        .default_track()
-        .ok_or(ProbeError::NoDuration)?;
+    // The track a conversion would decode, found the way a conversion finds it: the first one this
+    // build has a decoder for. A container may lead with something that is not the book — a track
+    // of video, or the cover picture and chapter text an m4b carries as tracks of their own — and a
+    // length is a length of the audio those stand in front of.
+    let track = audio_track(probed.format.tracks()).ok_or(ProbeError::NoDuration)?;
     let frames = track.codec_params.n_frames.ok_or(ProbeError::NoDuration)?;
-    // A container states a rate for the audio it carries and for nothing else, and a rate of 0 is
-    // a rate nothing plays at — which the arithmetic below would divide by. Both are a track there
-    // is no counting frames at.
+    // Not every container states the rate of the audio it carries, and a rate of 0 is a rate
+    // nothing plays at — which the arithmetic below would divide by. Both are a track there is no
+    // counting frames at.
     let rate = track
         .codec_params
         .sample_rate

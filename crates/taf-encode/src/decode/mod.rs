@@ -41,7 +41,9 @@
 mod aac_config;
 mod mp4_chapters;
 mod opus_input;
-mod symphonia;
+// Open to the crate for one thing alone: which track of a container is the book is settled in
+// there, and the duration probe has to settle it the same way a conversion does.
+pub(crate) mod symphonia;
 
 use ::symphonia::core::io::MediaSource;
 
