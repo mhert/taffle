@@ -40,9 +40,10 @@
 
 mod aac_config;
 mod mp4_chapters;
-mod opus_input;
-// Open to the crate for one thing alone: which track of a container is the book is settled in
-// there, and the duration probe has to settle it the same way a conversion does.
+// Open to the crate for one item each, and both for the same reason: the duration probe has to land
+// on the audio a conversion would read, so it puts the questions `open_source` puts — which backend
+// reads an input, and which track of a container is the book — to the code that answers them here.
+pub(crate) mod opus_input;
 pub(crate) mod symphonia;
 
 use ::symphonia::core::io::MediaSource;

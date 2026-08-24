@@ -217,7 +217,7 @@ pub enum JobError {
 ///
 /// # Errors
 ///
-/// [`ProbeError::Io`] if the file cannot be opened, and whatever
+/// [`ProbeError::Io`] if the file cannot be opened or stops being readable, and whatever
 /// [`taf_encode::probe_duration()`] makes of its bytes otherwise: [`ProbeError::Unrecognized`] for
 /// a file that is no container this build reads, [`ProbeError::NoDuration`] for one that states no
 /// length.

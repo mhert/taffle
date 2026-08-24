@@ -82,12 +82,15 @@ type Packets = PacketReader<Box<dyn MediaSource>>;
 /// that — the reader an Opus stream is taken apart with seeks as well, so an input that cannot is
 /// one this module could not decode either way.
 ///
+/// This is the crate's one answer to which backend reads an input: the duration probe asks it too,
+/// so that the length stated for a file is a length of the audio a conversion goes on to decode.
+///
 /// # Errors
 ///
 /// [`io::Error`] when the input cannot be rewound after being read. Bytes that cannot be read at
 /// all are an input that states no Opus — whatever is wrong with it is the next backend's to
 /// report, from the same place this started reading.
-pub(super) fn sniff(source: &mut dyn MediaSource) -> io::Result<bool> {
+pub(crate) fn sniff(source: &mut dyn MediaSource) -> io::Result<bool> {
     if !source.is_seekable() {
         return Ok(false);
     }

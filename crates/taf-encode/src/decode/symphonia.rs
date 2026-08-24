@@ -185,8 +185,10 @@ impl AudioSource for SymphoniaSource {
 /// an m4b carries as tracks of their own among them. Taking the first such track rather than the
 /// container's first track is what keeps those from being mistaken for the book.
 ///
-/// This is the crate's one answer to which track of a container is the book: the duration probe
-/// asks it too, so that the file a length is stated for is the file a conversion goes on to read.
+/// This is the crate's one answer to which track *this* backend would decode: the duration probe
+/// asks it too, so that the track a length is counted from is the track a conversion goes on to
+/// read. The input that never reaches it is Ogg-Opus, which the sniff in front of this backend
+/// sends to libopus — and which the probe routes the same way before it asks.
 pub(crate) fn audio_track(tracks: &[Track]) -> Option<&Track> {
     tracks
         .iter()
