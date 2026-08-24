@@ -13,10 +13,10 @@ ApplicationWindow {
 
     TaffleApp { id: app }
 
-    Timer {
-        id: smokeQuit
-        interval: 700
-        running: app.smokeMode
-        onTriggered: Qt.exit(0)
-    }
+    // The smoke run leaves on the window's own completion signal rather than after a wall-clock
+    // interval, which would only ever be a guess at how slowly the slowest machine boots.
+    // afterAnimating is emitted on the GUI thread (the other scene graph signals are not) every
+    // time the render loop is about to draw a frame, so the first one is the observable proof
+    // that the whole tree was instantiated and the window came up.
+    onAfterAnimating: if (app.smokeMode) Qt.exit(0)
 }
