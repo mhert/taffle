@@ -155,20 +155,27 @@ mod tests {
         /// alone while waiting.
         const POLL: Duration = Duration::from_millis(10);
 
-        // target/<profile>/deps/taffle_gui-<hash> → target/<profile>/taffle-gui
+        // <target>/<profile>/deps/taffle_gui-<hash> → <target>/<profile>/taffle-gui
         let mut binary = std::env::current_exe().expect("test binary path");
         binary.pop();
         if binary.ends_with("deps") {
             binary.pop();
         }
-        // The build below has to land in the very directory this test then launches from, so
-        // the profile is read back off that directory rather than assumed: cargo builds its
-        // `dev` profile into `debug`, and every other profile into a directory of its own name.
+        // The build below has to land in the very directory this test then launches from, so both
+        // the profile and the target directory are read back off that directory rather than
+        // assumed. The profile, because cargo builds its `dev` profile into `debug` and every
+        // other profile into a directory of its own name. The target directory, because a run can
+        // be given one that is not the default: `cargo llvm-cov` redirects the whole tree into
+        // `llvm-cov-target`, and it does so with `--target-dir`, which a child cargo inherits
+        // nothing of.
         let dir = binary
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .expect("the profile directory the test binary sits in");
         let profile = if dir == "debug" { "dev" } else { dir };
+        let target_dir = binary
+            .parent()
+            .expect("the target directory the profile directory sits in");
 
         // `cargo test` builds this test's own harness binary, which is a separate artifact
         // from the plain bin launched below — so a green run does not by itself prove that bin
@@ -185,6 +192,8 @@ mod tests {
                 "--profile",
                 profile,
             ])
+            .arg("--target-dir")
+            .arg(target_dir)
             .output()
             .expect("running cargo build -p taffle-gui");
         assert!(
@@ -193,7 +202,8 @@ mod tests {
             String::from_utf8_lossy(&build.stderr)
         );
 
-        binary.push("taffle-gui");
+        // Windows names the artifact `taffle-gui.exe`; every other host names it `taffle-gui`.
+        binary.push(format!("taffle-gui{}", std::env::consts::EXE_SUFFIX));
         assert!(
             binary.is_file(),
             "expected the taffle-gui binary at {}",

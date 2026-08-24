@@ -5,9 +5,10 @@
 #
 # - taffle-gui: a headless `--smoke` self-test that boots the whole QML chrome under the
 #   offscreen platform, drives a fake batch through the bridge and model, and fails on any QML
-#   diagnostic. It runs in `cargo test -p taffle-gui` on every OS lane and against the installed
-#   package in every release lane. What remains in the crate outside the worker's and plan's
-#   ordinary unit tests is chrome: QObject wiring and QML, none of it constructible off Qt.
+#   diagnostic. It runs inside the `cargo test --workspace` of all four OS lanes — Linux, both
+#   macOS runners and Windows — each of which installs a Qt for exactly that. What remains in the
+#   crate outside the worker's and plan's ordinary unit tests is chrome: QObject wiring and QML,
+#   none of it constructible off Qt.
 exclude_globs = ["crates/taffle-gui/**"]
 
 # The mutants no test can ever kill, each one named on its own.
