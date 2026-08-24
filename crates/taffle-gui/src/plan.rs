@@ -120,6 +120,7 @@ pub fn capture(panel: &Panel) -> Result<BookPlan, CaptureError> {
         .to_string_lossy()
         .into_owned();
     let output = if panel.output_text.is_empty() {
+        // This is the name the output field stands empty for; see `derived_output`.
         default_output_path(first)
     } else {
         PathBuf::from(&panel.output_text)
@@ -152,6 +153,17 @@ pub fn capture(panel: &Panel) -> Result<BookPlan, CaptureError> {
         panel: panel.clone(),
         job,
     })
+}
+
+/// Where the book in `panel` goes while nothing is typed into its output field: the name derived
+/// from the first input, which is exactly what [`capture`] resolves an empty field to — and nothing
+/// at all where the panel holds no file to derive a name from.
+///
+/// The field shows this while it stands empty, so that what a conversion will write is read off the
+/// panel rather than guessed at by whoever is looking at it.
+#[must_use]
+pub fn derived_output(panel: &Panel) -> Option<PathBuf> {
+    panel.files.first().map(|first| default_output_path(first))
 }
 
 /// Says so where `mode` plans more chapters than a Toniebox plays, in the words the command line
@@ -223,7 +235,7 @@ mod tests {
 
     use taffle::{ChapterMode, MAX_CHAPTERS};
 
-    use super::{capture, chapter_warning, CaptureError, Panel};
+    use super::{capture, chapter_warning, derived_output, CaptureError, Panel};
 
     /// A panel holding `files` and nothing typed into any of its fields.
     fn panel(files: &[&str]) -> Panel {
@@ -297,6 +309,17 @@ mod tests {
             error.to_string(),
             "the chapter list holds 'twelve', which is no duration"
         );
+    }
+
+    #[test]
+    fn an_empty_output_field_stands_for_the_name_a_capture_resolves() {
+        let p = panel(&["a/01.mp3", "a/02.mp3"]);
+        // The field shows this as its placeholder, so it has to be the very path the book is
+        // written to where nobody types one — held against the capture rather than restated.
+        assert_eq!(derived_output(&p), Some(PathBuf::from("a/01.taf")));
+        assert_eq!(capture(&p).expect("a plan").job.output, derived_output(&p));
+        // A book with no file derives no name, and the field stands for nothing.
+        assert_eq!(derived_output(&panel(&[])), None);
     }
 
     #[test]

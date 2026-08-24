@@ -127,6 +127,12 @@ pub mod qobject {
         #[cxx_name = "outputText"]
         fn output_text(self: &Self) -> QString;
 
+        /// Where the TAF goes while nobody has typed an output: what the field stands empty for,
+        /// and nothing at all while the book holds no file to derive a name from.
+        #[qinvokable]
+        #[cxx_name = "derivedOutput"]
+        fn derived_output(self: &Self) -> QString;
+
         /// What the chapter field holds.
         #[qinvokable]
         #[cxx_name = "chaptersText"]
@@ -341,6 +347,15 @@ impl qobject::TaffleApp {
     /// What the output field holds.
     pub fn output_text(&self) -> QString {
         QString::from(self.rust().panel.output_text.as_str())
+    }
+
+    /// Where the TAF goes while nobody has typed an output.
+    pub fn derived_output(&self) -> QString {
+        let derived = plan::derived_output(&self.rust().panel)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+
+        QString::from(derived.as_str())
     }
 
     /// What the chapter field holds.
