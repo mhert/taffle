@@ -28,7 +28,11 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 45 rather than the 30 the other Rust-only lanes get: this one compiles the cxx-qt shim layer
+    # — the generated C++, moc, and the QML module — on top of the Rust tree, and a cold build of
+    # that shape has been measured overrunning 30 minutes on an uncached runner. A warm cache
+    # returns it in minutes; the ceiling is here for the first run of a branch.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
@@ -105,7 +109,9 @@ jobs:
       - name: Install Qt 6.7.2 via aqt (Linux)
         if: runner.os == 'Linux'
         # aqt ships only Qt's own binaries, so install the system libraries QtGui and
-        # QtQuick load at runtime.
+        # QtQuick load at runtime. No GPU driver goes beside them — no Mesa rasterizer, no
+        # Vulkan ICD: the chrome draws through QtQuick alone, and the smoke run puts that on
+        # its software scene graph, so nothing here ever asks for a rendering context.
         run: |
           sudo apt-get update
           # Dev GL/EGL, not just runtime: aqt's Qt links with -lGL, and the libGL.so linker
