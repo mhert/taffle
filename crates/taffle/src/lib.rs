@@ -11,6 +11,10 @@
 //! through block by block and hashed on the way, so that what a frontend shows has been checked
 //! rather than believed.
 //!
+//! [`duration`] is the one thing here that touches no file: the grammar a length of audio is typed
+//! in and the clock it is shown back on. It sits below the frontends rather than in one of them, so
+//! that all of them read and write a duration the same way.
+//!
 //! # A frontend depends on this crate and no other
 //!
 //! What these workflows hand back is made of `taf-encode`'s types and `taf`'s, so those are
@@ -37,6 +41,8 @@
 mod cover;
 mod inspect;
 mod output;
+
+pub mod duration;
 
 use std::fs::File;
 use std::path::PathBuf;

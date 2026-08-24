@@ -7,8 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-
-use crate::duration::Seconds;
+use taffle::duration::Seconds;
 
 /// Converts audiobooks into the Tonie Audio Format.
 #[derive(Debug, Parser)]

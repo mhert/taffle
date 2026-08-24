@@ -847,7 +847,6 @@ dependencies = [
  "taf",
  "taffle",
  "tempfile",
- "thiserror",
 ]
 
 [[package]]

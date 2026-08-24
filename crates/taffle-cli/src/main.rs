@@ -9,7 +9,6 @@
 
 mod cli;
 mod convert_cmd;
-mod duration;
 mod info_cmd;
 
 use std::process::ExitCode;

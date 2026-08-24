@@ -17,9 +17,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
+use taffle::duration::clock;
 use taffle::{inspect, InspectError, Inspection};
-
-use crate::duration::clock;
 
 /// The bytes a SHA-1 comes to, which is what a TAF header states its audio hashes to.
 const SHA1_LEN: usize = 20;

@@ -12,13 +12,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
+use taffle::duration::{clock, RATE};
 use taffle::{
     default_output_path, run_convert, ChapterError, ChapterMode, Conversion, ConvertError,
     ConvertJob, JobError, JobOutcome, Progress, SilenceOpts,
 };
 
 use crate::cli::ConvertArgs;
-use crate::duration::{clock, RATE};
 
 /// The chapters a Toniebox plays, as `FORMAT.md` states it from teddycloud's own limit.
 ///
