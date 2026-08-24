@@ -3,6 +3,7 @@
 
 mod bridge;
 mod plan;
+mod worker;
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
