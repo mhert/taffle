@@ -2,6 +2,7 @@
 //! nothing else — everything the chrome does lives behind `bridge`.
 
 mod bridge;
+mod plan;
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
