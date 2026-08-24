@@ -45,7 +45,11 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     }
 
     let mut line = ProgressLine::default();
-    let outcome = run_convert(job, &mut |event| line.show(event));
+    let outcome = run_convert(job, &mut |event| {
+        line.show(event);
+
+        std::ops::ControlFlow::Continue(())
+    });
     // Whatever is said next — the file that was written, or why it was not — begins on a line of
     // its own.
     line.finish();

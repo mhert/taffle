@@ -61,7 +61,11 @@ fn job(inputs: Vec<PathBuf>, output: Option<PathBuf>) -> ConvertJob {
 /// Runs `job` and hands over what it came to, with every progress event it reported.
 fn run(job: ConvertJob) -> (Result<JobOutcome, JobError>, Vec<Progress>) {
     let mut progress = Vec::new();
-    let outcome = run_convert(job, &mut |event| progress.push(event));
+    let outcome = run_convert(job, &mut |event| {
+        progress.push(event);
+
+        std::ops::ControlFlow::Continue(())
+    });
 
     (outcome, progress)
 }
@@ -398,6 +402,29 @@ fn an_input_that_fails_is_named_by_the_path_the_caller_stated() {
     assert_eq!(
         error.to_string(),
         format!("input '{}' failed", book.display())
+    );
+}
+
+/// A cancelled job reports the cancellation and leaves the partial file for the frontend to judge.
+#[test]
+fn a_cancelled_job_says_so_and_leaves_the_partial_file() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let taf_path = dir.path().join("Book.taf");
+
+    let outcome = run_convert(
+        job(vec![fixture(BOOK)], Some(taf_path.clone())),
+        &mut |_| std::ops::ControlFlow::Break(()),
+    );
+
+    let error = outcome.expect_err("the callback asked the conversion to stop");
+    assert!(
+        matches!(error, JobError::Convert(ConvertError::Cancelled)),
+        "{error:?}"
+    );
+    assert_eq!(error.to_string(), "the conversion was cancelled");
+    assert!(
+        taf_path.exists(),
+        "the partial file is the frontend's to remove"
     );
 }
 

@@ -103,7 +103,8 @@ pub struct JobOutcome {
 ///
 /// The inputs are opened in the order they are stated and in front of the output, so a job naming a
 /// file that is not there leaves nothing behind at all. `progress` is the engine's own, handed
-/// through as it comes.
+/// through as it comes — and so is the answer it gives back, which is what stops a conversion that
+/// is running.
 ///
 /// # Errors
 ///
@@ -112,15 +113,18 @@ pub struct JobOutcome {
 /// - [`JobError::Convert`] if the conversion itself failed. A job of no inputs is one of those,
 ///   refused as [`ChapterError::Empty`] before a file is made for it: what the engine calls having
 ///   nothing to convert is what a caller is handed here, rather than a second name for it.
+/// - [`JobError::Convert`] carrying [`ConvertError::Cancelled`] if `progress` asked the conversion
+///   to stop.
 ///
-/// A conversion that failed part-way leaves the output file behind holding what was written before
-/// it failed, which is [`taf_encode::convert()`]'s business and stated there.
+/// A conversion that failed part-way — a cancelled one among them — leaves the output file behind
+/// holding what was written before it failed, which is [`taf_encode::convert()`]'s business and
+/// stated there.
 ///
 /// Failing to write the cover is *not* one of these; it comes back in
 /// [`JobOutcome::cover_error`].
 pub fn run_convert(
     job: ConvertJob,
-    progress: &mut dyn FnMut(Progress),
+    progress: &mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
 ) -> Result<JobOutcome, JobError> {
     let ConvertJob {
         inputs,

@@ -224,8 +224,10 @@ pub struct ConversionReport {
 /// The inputs are decoded, brought to the 48 kHz stereo a TAF carries, put through the silence
 /// operations `opts` states, and encoded into Opus packets that go into the file with the chapter
 /// marks the plan came to. `audio_id` is the caller's — a Toniebox reads it, and deriving it from a
-/// clock is the caller's business, not an engine's. `progress` is called as the conversion runs;
-/// nothing about the file depends on what it does.
+/// clock is the caller's business, not an engine's. `progress` is called as the conversion runs and
+/// what it answers is heard: [`std::ops::ControlFlow::Break`] stops the conversion at the event it
+/// was answered on, which is between two of the packets that go into the file and never inside one.
+/// Nothing else about the file depends on what the callback does.
 ///
 /// # Chapters that come out in one place
 ///
@@ -265,12 +267,13 @@ pub struct ConversionReport {
 /// - [`ConvertError::Taf`] or [`ConvertError::Io`] if the file could not be written.
 /// - [`ConvertError::Io`] as well if the thread reading the inputs or one of the threads encoding
 ///   them failed outright, since a thread that is gone leaves no failure of its own behind.
+/// - [`ConvertError::Cancelled`] if `progress` asked the conversion to stop.
 pub fn convert<W: Write + Seek>(
     inputs: Vec<Input>,
     opts: &Conversion,
     audio_id: AudioId,
     out: W,
-    progress: &mut dyn FnMut(Progress),
+    progress: &mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
 ) -> Result<ConversionReport, ConvertError> {
     if inputs.is_empty() {
         return Err(ChapterError::Empty.into());
@@ -337,7 +340,9 @@ pub fn convert<W: Write + Seek>(
         within(offsets, produced.frames)?;
     }
 
-    progress(Progress::Finalizing);
+    if progress(Progress::Finalizing).is_break() {
+        return Err(ConvertError::Cancelled);
+    }
     // A TAF's first block holds an audio page, so a conversion that came out with no audio still
     // writes the one 60 ms frame of silence that makes it a file.
     if sink.frames() == 0 {
@@ -399,6 +404,13 @@ pub enum ConvertError {
     /// written failing either way, and the error inside says which half it was.
     #[error("output i/o failed")]
     Io(#[from] std::io::Error),
+    /// The caller's progress callback asked the conversion to stop.
+    ///
+    /// The output holds what was written before the word arrived, exactly as it does after any
+    /// other mid-write failure; what becomes of that file is the frontend's business, stated
+    /// where the frontends state it.
+    #[error("the conversion was cancelled")]
+    Cancelled,
 }
 
 impl From<WriterIoError> for ConvertError {
@@ -431,7 +443,8 @@ fn next_job(jobs: &std::sync::Mutex<std::sync::mpsc::Receiver<Job>>) -> Option<J
 ///
 /// # Errors
 ///
-/// What encoding a chunk failed with, or what writing one to the file failed with.
+/// What encoding a chunk failed with, what writing one to the file failed with, or that the caller
+/// asked the conversion to stop.
 fn feeding<W: Write + Seek>(
     collector: &mut Collector<'_, W>,
     feeds: std::sync::mpsc::Receiver<Feed>,
@@ -443,7 +456,7 @@ fn feeding<W: Write + Seek>(
     for feed in feeds {
         let job = match feed {
             Feed::Reached(input_index) => {
-                collector.reached(input_index);
+                collector.reached(input_index)?;
                 None
             }
             Feed::Chapter(title) => chunker.begin_chapter(title),
@@ -465,7 +478,7 @@ fn feeding<W: Write + Seek>(
 struct Collector<'a, W: Write + Seek> {
     sink: &'a mut PacketSink<W>,
     chapters: &'a mut Vec<ChapterOut>,
-    progress: &'a mut dyn FnMut(Progress),
+    progress: &'a mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
     /// Batches that arrived ahead of their turn, by job index.
     pending: std::collections::BTreeMap<usize, Result<Vec<Vec<u8>>, opus::Error>>,
     /// The chapters of jobs not yet written, by job index.
@@ -481,7 +494,7 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
     fn new(
         sink: &'a mut PacketSink<W>,
         chapters: &'a mut Vec<ChapterOut>,
-        progress: &'a mut dyn FnMut(Progress),
+        progress: &'a mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
     ) -> Self {
         Self {
             sink,
@@ -495,15 +508,24 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
     }
 
     /// The conversion has reached an input, which is the caller's to hear about.
-    fn reached(&mut self, input_index: usize) {
-        (self.progress)(Progress::Decoding { input_index });
+    ///
+    /// # Errors
+    ///
+    /// That the caller asked the conversion to stop on hearing it.
+    fn reached(&mut self, input_index: usize) -> Result<(), ConvertError> {
+        if (self.progress)(Progress::Decoding { input_index }).is_break() {
+            return Err(ConvertError::Cancelled);
+        }
+
+        Ok(())
     }
 
     /// Hands a job to the pool and writes whatever batches are already waiting.
     ///
     /// # Errors
     ///
-    /// What writing a waiting batch failed with, or that the pool is gone.
+    /// What writing a waiting batch failed with, that the pool is gone, or that the caller asked
+    /// the conversion to stop.
     fn dispatch(
         &mut self,
         job: Job,
@@ -535,7 +557,8 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
     ///
     /// # Errors
     ///
-    /// What a worker failed with, or what writing failed with.
+    /// What a worker failed with, what writing failed with, or that the caller asked the
+    /// conversion to stop.
     fn drain(&mut self, batches: &std::sync::mpsc::Receiver<Batch>) -> Result<(), ConvertError> {
         for batch in batches {
             self.accept(batch)?;
@@ -553,7 +576,8 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
     ///
     /// # Errors
     ///
-    /// What the worker that encoded a batch failed with, or what writing it failed with.
+    /// What the worker that encoded a batch failed with, what writing it failed with, or that the
+    /// caller asked the conversion to stop.
     fn accept(&mut self, (index, batch): Batch) -> Result<(), ConvertError> {
         self.pending.insert(index, batch);
 
@@ -572,9 +596,12 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
             }
             for packet in &batch {
                 self.sink.push_packet(packet)?;
-                (self.progress)(Progress::Encoded {
+                let encoded = Progress::Encoded {
                     samples_done: self.sink.frames(),
-                });
+                };
+                if (self.progress)(encoded).is_break() {
+                    return Err(ConvertError::Cancelled);
+                }
             }
             self.next += 1;
         }
@@ -689,6 +716,8 @@ mod tests {
             if let Progress::Encoded { samples_done } = event {
                 done.push(samples_done);
             }
+
+            std::ops::ControlFlow::Continue(())
         };
         let (jobs, waiting) = std::sync::mpsc::sync_channel(2);
         let (worker, batches) = std::sync::mpsc::channel();
@@ -738,7 +767,7 @@ mod tests {
         let mut file = Cursor::new(Vec::new());
         let mut sink = PacketSink::new(AudioId::new(7), &mut file).unwrap();
         let mut chapters = Vec::new();
-        let mut progress = |_| {};
+        let mut progress = |_| std::ops::ControlFlow::Continue(());
         let mut collector = Collector::new(&mut sink, &mut chapters, &mut progress);
         let (jobs, waiting) = std::sync::mpsc::sync_channel(1);
         let (worker, batches) = std::sync::mpsc::channel();

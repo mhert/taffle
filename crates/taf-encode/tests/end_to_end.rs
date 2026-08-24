@@ -198,6 +198,8 @@ fn run(
     let mut progress = Vec::new();
     let report = convert(inputs, opts, AUDIO_ID, &mut file, &mut |event| {
         progress.push(event);
+
+        std::ops::ControlFlow::Continue(())
     });
 
     (file.into_inner(), progress, report)
@@ -571,6 +573,31 @@ fn the_conversion_reports_what_it_is_doing_as_it_runs() {
     assert!(plays(*encoded.last().unwrap()) <= taf.report.duration + FRAME_TIME);
 }
 
+/// A conversion stops where the callback says stop, whichever event carried the word.
+#[test]
+fn a_break_from_the_callback_cancels_the_conversion() {
+    for stop_at in ["decoding", "encoded", "finalizing"] {
+        let mut out = Cursor::new(Vec::new());
+        let result = convert(
+            vec![input(fixtures::TINY_M4B.to_vec(), "tiny.m4b")],
+            &Conversion::default(),
+            AUDIO_ID,
+            &mut out,
+            &mut |event| match (stop_at, event) {
+                ("decoding", Progress::Decoding { .. })
+                | ("encoded", Progress::Encoded { .. })
+                | ("finalizing", Progress::Finalizing) => std::ops::ControlFlow::Break(()),
+                _ => std::ops::ControlFlow::Continue(()),
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ConvertError::Cancelled)),
+            "breaking at {stop_at} did not cancel: {result:?}"
+        );
+    }
+}
+
 #[test]
 fn a_title_belongs_to_the_mark_it_was_authored_on_and_not_to_the_chapter_beside_it() {
     // The fixture's own marks, moved: the atom now states 5 s first and 2 s behind it, and neither
@@ -740,7 +767,7 @@ fn an_output_that_cannot_be_written_to_is_stated_as_the_file_failing_and_not_the
         &Conversion::default(),
         AUDIO_ID,
         Full::with(BLOCK_LEN),
-        &mut |_| {},
+        &mut |_| std::ops::ControlFlow::Continue(()),
     );
     // And room for a few blocks of it, so the stream begins and the audio runs out of room.
     let midway = convert(
@@ -748,7 +775,7 @@ fn an_output_that_cannot_be_written_to_is_stated_as_the_file_failing_and_not_the
         &Conversion::default(),
         AUDIO_ID,
         Full::with(BLOCK_LEN * 3),
-        &mut |_| {},
+        &mut |_| std::ops::ControlFlow::Continue(()),
     );
 
     // And an output that takes everything and then cannot be pushed out: a conversion is not
@@ -758,7 +785,7 @@ fn an_output_that_cannot_be_written_to_is_stated_as_the_file_failing_and_not_the
         &Conversion::default(),
         AUDIO_ID,
         Unflushable,
-        &mut |_| {},
+        &mut |_| std::ops::ControlFlow::Continue(()),
     );
 
     for refusal in [opening, midway, unflushed] {
