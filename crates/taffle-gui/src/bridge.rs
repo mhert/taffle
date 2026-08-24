@@ -603,55 +603,47 @@ impl qobject::TaffleApp {
         self.as_mut().refresh();
     }
 
-    /// Puts a made-up book through a made-up conversion.
+    /// Puts a made-up batch of books through made-up conversions.
     ///
     /// The self-test boots the whole window and leaves on the first frame it draws, and an empty
     /// window draws none of what a batch draws: no row, no bar, no line saying what a book came
-    /// to. So the drill queues one book and hands a whole batch's worth of words to the very
-    /// [`Self::apply`] a running batch reports through — and the frame that is drawn is a frame of
-    /// a batch that has just finished, with the next book already being filled in.
+    /// to. So the drill queues one book for every way a batch can leave one — converted, failed,
+    /// stopped — and hands a whole batch's worth of words to the very [`Self::apply`] a running
+    /// batch reports through. The frame that is drawn is a frame of a batch that has just
+    /// finished: three rows, each saying what became of its book in the colour that goes with it,
+    /// and the next book already being filled in underneath.
     ///
     /// Nothing is converted, read or written: the paths name files that are not there, and what
-    /// the conversion came to is fabricated.
+    /// the conversions came to is fabricated.
     pub fn smoke_drill(mut self: Pin<&mut Self>) {
-        /// What the drill's book is called and what its files are named: a captured book takes
-        /// its title from its first input, so a hand-built one says the same.
+        /// What the drill's books are named after: one of them per state a book that has run can
+        /// be left in, each named after the state it is driven to.
         const STEM: &str = "taffle-smoke-drill";
-        /// How long the book states it plays. A book that states none shows a stripe instead of a
-        /// percent, and a bar counting a real fraction is the one worth drawing.
-        const STATED: Duration = Duration::from_secs(60);
-        /// How long the fabricated conversion says it wrote: a second past what the inputs
-        /// stated, which is what a conversion that adds a pause writes.
+        /// How long the fabricated conversion says it wrote: a second past the minute every drill
+        /// book states it plays, which is what a conversion that adds a pause writes.
         const WRITTEN: Duration = Duration::from_secs(61);
 
-        let temp = std::env::temp_dir();
-        let taf_path = temp.join(format!("{STEM}.taf"));
-        let panel = plan::Panel {
-            files: vec![temp.join(format!("{STEM}.m4b"))],
-            ..plan::Panel::default()
-        };
-        // Built rather than captured: `plan::capture` answers with a `Result`, and a drill that
-        // could quietly decline to run would leave the self-test passing while proving nothing.
-        let plan = plan::BookPlan {
-            title: STEM.to_owned(),
-            job: taffle::ConvertJob {
-                inputs: panel.files.clone(),
-                output: Some(taf_path.clone()),
-                options: taffle::Conversion::default(),
-                write_cover: panel.extract_cover,
-            },
-            panel,
-        };
+        // Only ever the self-test's. The drill sits on the object the shipped window holds, which
+        // is the only place QML could reach it from, and a window that ran it would be showing
+        // books nobody queued.
+        if !*self.as_ref().smoke_mode() {
+            return;
+        }
+
+        let converted = format!("{STEM}-converted");
+        let failed = format!("{STEM}-failed");
+        let queued = [
+            drill_book(&converted),
+            drill_book(&failed),
+            drill_book(&format!("{STEM}-stopped")),
+        ];
         {
             let mut rust = self.as_mut().rust_mut();
-            let at = rust.books.len();
-            rust.books.push(Book {
-                plan,
-                probed: Some(STATED),
-                state: BookState::Ready,
-            });
-            // The one job of this batch is the book just queued, wherever it landed.
-            rust.batch = vec![at];
+            let first = rust.books.len();
+            rust.books.extend(queued);
+            // The jobs of this batch are the books just queued, in the order they were queued,
+            // wherever they landed.
+            rust.batch = (first..rust.books.len()).collect();
         }
         // A run is on from where it is started until it says it is done, so the drill's is too:
         // what turns it off again is `BatchDone` going through `apply`, the way a real one's does.
@@ -677,7 +669,7 @@ impl qobject::TaffleApp {
             worker::Event::Finished {
                 index: 0,
                 result: Ok(taffle::JobOutcome {
-                    taf_path,
+                    taf_path: drill_path(&converted, "taf"),
                     cover_path: None,
                     cover_error: None,
                     report: taffle::ConversionReport {
@@ -687,6 +679,24 @@ impl qobject::TaffleApp {
                         audio_id: taffle::AudioId::new(1),
                     },
                 }),
+            },
+            worker::Event::Started { index: 1 },
+            worker::Event::Finished {
+                index: 1,
+                // The layer a conversion gives up at and what was said under it, joined the way
+                // the batch joins a chain. The input really is not there, so this is where a run
+                // of this job would give up; the words under it are made up, because asking the
+                // filesystem for the real ones is the reading the drill does not do.
+                result: Err(worker::BookFailure::Failed(format!(
+                    "cannot open input {}: the file is not there",
+                    drill_path(&failed, "m4b").display()
+                ))),
+            },
+            // The last book is reported without ever starting, which is what a batch somebody
+            // stopped here would say about the one still waiting.
+            worker::Event::Finished {
+                index: 2,
+                result: Err(worker::BookFailure::Cancelled),
             },
             worker::Event::BatchDone,
         ] {
@@ -698,7 +708,9 @@ impl qobject::TaffleApp {
         // read a length off a file that is not there.
         {
             let mut rust = self.as_mut().rust_mut();
-            rust.panel.files.push(temp.join(format!("{STEM}-next.m4b")));
+            rust.panel
+                .files
+                .push(drill_path(&format!("{STEM}-next"), "m4b"));
             // The lengths are index-aligned with the files, and nothing was probed.
             rust.panel_durations.push(None);
         }
@@ -1028,6 +1040,46 @@ fn report_line(outcome: &taffle::JobOutcome) -> String {
 /// conversion had only half written, so a row that did not convert says nothing was left behind.
 fn removed_note(reason: &str) -> String {
     format!("{reason}; the unfinished file was removed")
+}
+
+/// The made-up book the smoke drill queues under `stem`: one input named after it, an output
+/// beside it, and a length it states.
+///
+/// Built rather than captured: `plan::capture` answers with a `Result`, and a drill that could
+/// quietly decline to run would leave the self-test passing while proving nothing. Neither of the
+/// two paths is ever opened.
+fn drill_book(stem: &str) -> Book {
+    /// How long a drill book states it plays. A book that states none shows a stripe instead of a
+    /// percent, and a bar counting a real fraction is the one worth drawing.
+    const STATED: Duration = Duration::from_secs(60);
+
+    let panel = plan::Panel {
+        files: vec![drill_path(stem, "m4b")],
+        ..plan::Panel::default()
+    };
+
+    Book {
+        plan: plan::BookPlan {
+            // A captured book takes its title from its first input, so a hand-built one says the
+            // same.
+            title: stem.to_owned(),
+            job: taffle::ConvertJob {
+                inputs: panel.files.clone(),
+                output: Some(drill_path(stem, "taf")),
+                options: taffle::Conversion::default(),
+                write_cover: panel.extract_cover,
+            },
+            panel,
+        },
+        probed: Some(STATED),
+        state: BookState::Ready,
+    }
+}
+
+/// What a drill file named `stem` would be called, if anything ever wrote one: a name under the
+/// temp directory, so that a path which did escape the drill could not land in anybody's work.
+fn drill_path(stem: &str, extension: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{stem}.{extension}"))
 }
 
 /// How long each of `files` states it plays, index-aligned with them.

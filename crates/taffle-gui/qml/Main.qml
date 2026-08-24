@@ -26,8 +26,14 @@ ApplicationWindow {
     // An empty window instantiates none of what a batch shows — no row, no bar, no line saying
     // what a book came to — so a smoke run of one would boot half the chrome and call it proof.
     // The drill puts a finished batch behind the window before the first frame is laid out, so
-    // the run that quits on that frame has drawn the whole of it.
-    Component.onCompleted: if (window.app.smokeMode) window.app.smokeDrill()
+    // the run that quits on that frame has drawn the whole of it. The queue is then left at its
+    // end: a view creates only the rows it is showing, the drill queues one book for every way a
+    // batch can leave one, and three of those rows stand taller than the third of the window the
+    // queue keeps — so the last of them, the book that was stopped, is drawn only from there.
+    Component.onCompleted: if (window.app.smokeMode) {
+        window.app.smokeDrill()
+        queue.positionViewAtEnd()
+    }
 
     // The smoke run leaves on the window's own completion signal rather than after a wall-clock
     // interval, which would only ever be a guess at how slowly the slowest machine boots.
