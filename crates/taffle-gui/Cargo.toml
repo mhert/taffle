@@ -43,11 +43,19 @@ missing_errors_doc = "deny"
 module_name_repetitions = "allow"   # matches the workspace's stated opt-outs
 must_use_candidate = "allow"        # apply #[must_use] by judgement, not blanket
 
-# cargo-deb reads this. Depends stays at $auto: the release job builds inside each distro's own
-# container, so dpkg-shlibdeps resolves that distro's Qt and opus package names — one metadata
-# table is correct for both distros.
+# cargo-deb reads this.
 [package.metadata.deb]
 name = "taffle-gui"
+# `$auto` is dpkg-shlibdeps, which reads the binary's linked libraries: it resolves Qt and opus
+# to whatever the distro the deb was built in calls them, which is why every deb is built inside
+# its own distro's container. What it cannot see is a QML plugin — the engine dlopens those by
+# module URI while the app runs, and nothing in the ELF names them — so they are listed by hand.
+# Leave them out and the package installs onto a machine carrying the Qt libraries alone, starts,
+# and then fails to load its whole chrome. The list runs longer than the import lines in qml/
+# because a plugin brings its own: Controls is QML written over Templates, and the
+# ApplicationWindow it hands back is a Window. Debian and Ubuntu spell all seven the same, so one
+# table stays right for both.
+depends = "$auto, qml6-module-qtqml, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qml6-module-qtquick-templates, qml6-module-qtquick-window, qml6-module-qtquick-dialogs"
 maintainer = "mhert <mathias@mh.cx>"
 # Debian Policy asks every package to carry a verbatim copy of its license, and without this
 # cargo-deb writes a copyright file that names none. The 0 is how many leading lines to skip:

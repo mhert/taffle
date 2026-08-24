@@ -199,9 +199,14 @@ jobs:
       - name: The GUI package declares the Qt it links
         # Same failure, one library further: the GUI binary is nothing without Qt, so a $auto
         # that resolved to no Qt at all is a package that installs and then will not start.
+        # The pattern is libqt6 rather than qt because the manifest also names the qml6-module
+        # packages outright, and those would satisfy a looser pattern whether or not $auto
+        # resolved anything at all; only dpkg-shlibdeps can put a libqt6* library package in
+        # this field. The hand-written module names need no grep of their own: a name that does
+        # not exist fails the install in the next step.
         run: |
           dpkg -I taffle-gui_*_${{ matrix.tag }}.deb
-          dpkg -I taffle-gui_*_${{ matrix.tag }}.deb | grep -q 'Depends:.*qt'
+          dpkg -I taffle-gui_*_${{ matrix.tag }}.deb | grep -q 'Depends:.*libqt6'
       - name: Install both and put each through its own smoke
         run: |
           apt-get install -y ./taffle-cli_*_${{ matrix.tag }}.deb ./taffle-gui_*_${{ matrix.tag }}.deb
