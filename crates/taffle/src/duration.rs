@@ -32,7 +32,7 @@ const PER_COMPONENT: u64 = 60;
 /// The components a duration is typed in at the most: hours, minutes, seconds.
 const COMPONENTS: usize = 3;
 
-/// A length of audio in seconds, as it was typed on the command line.
+/// A length of audio in seconds, as somebody typed it.
 ///
 /// [`FromStr`] is the only way to one, so what is inside is a duration somebody typed: not
 /// negative, not a NaN, and no longer than the seconds a `u64` counts.
