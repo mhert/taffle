@@ -8,8 +8,9 @@
 #   diagnostic. It runs inside the `cargo test --workspace` of all four OS lanes — Linux, both
 #   macOS runners and Windows — each of which installs a Qt for exactly that, and once more in
 #   every release lane that ships the GUI: the Debian, Ubuntu and Arch packages are installed, the
-#   Windows installer is run, the macOS app bundle is assembled and deployed, and the same
-#   self-test is put to the binary each of them leaves behind. What remains in the crate outside
+#   Windows installer is run, the macOS app bundle is assembled and deployed, the Linux AppImage is
+#   packed and started, and the same self-test is put to the binary each of them leaves behind.
+#   What remains in the crate outside
 #   the worker's and plan's ordinary unit tests is chrome: QObject wiring and QML, none of it
 #   constructible off Qt.
 exclude_globs = ["crates/taffle-gui/**"]

@@ -44,6 +44,18 @@ sudo pacman -U taffle-cli-<version>-1-x86_64.pkg.tar.zst
 sudo pacman -U taffle-gui-<version>-1-x86_64.pkg.tar.zst
 ```
 
+**Other Linux** — the window as an AppImage: one file carrying the Qt it draws itself
+with and the libopus it decodes through, for the distros the packages above were not
+built for. It runs on a glibc of 2.35 or newer — Ubuntu 22.04, Debian 12, and anything
+younger. Nothing is installed: make it executable and run it.
+
+```sh
+chmod +x taffle-gui-<version>-x86_64.AppImage
+./taffle-gui-<version>-x86_64.AppImage
+```
+
+The command has no AppImage; on these distros it is built from source (below).
+
 **macOS** — a tarball per program and architecture, each carrying its own libopus, so
 nothing needs installing alongside it. The window ships as `Taffle.app`, which carries
 the Qt it draws itself with as well: unpack it, clear the quarantine macOS tags a

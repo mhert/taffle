@@ -303,6 +303,129 @@ jobs:
             PKGBUILD
             *.pkg.tar.zst
 
+  # The Linux that is neither Debian, Ubuntu nor Arch gets the window as an AppImage:
+  # one file carrying the Qt it draws itself with and the libopus it decodes through.
+  # It is built on ubuntu-22.04 where every other Linux lane runs 24.04, and that is
+  # the point: an AppImage takes the glibc it was linked against as its floor, so the
+  # older runner is what lets the file run on distros the newer one would shut out.
+  # The Qt inside is aqt's 6.7.2 — the version the frontend was developed against —
+  # not the distro's: the deb and Arch lanes exist to link the distro's own Qt; this
+  # lane exists to carry everything itself.
+  appimage:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - run: rustup show
+      - name: Install Qt 6.7.2 via aqt
+        # The same aqt install the CI test lane uses, with two additions. The xcb
+        # libraries: the AppImage has to carry Qt's xcb platform plugin for the desktops
+        # it will run on, and linuxdeploy can only bundle that plugin's dependencies if
+        # they resolve here. libopus-dev: what the engine decodes through; the built
+        # library rides into the AppImage below like any other linked library.
+        run: |
+          sudo apt-get update
+          # Dev GL/EGL, not just runtime: aqt's Qt links with -lGL, and the libGL.so linker
+          # symlink only ships in the -dev packages.
+          sudo apt-get install -y --no-install-recommends \
+            libopus-dev \
+            libgl-dev libegl-dev libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 \
+            libdbus-1-3 libglib2.0-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libxcb-util1
+          pipx install aqtinstall
+          # The linux desktop arch is named linux_gcc_64 for Qt >= 6.7 (plain gcc_64 matches
+          # nothing); glob the created directory rather than assuming what it is named on disk.
+          aqt install-qt linux desktop 6.7.2 linux_gcc_64 -O "$HOME/Qt"
+          qt=$(ls -d "$HOME"/Qt/6.7.2/*/); qt="${qt%/}"
+          echo "$qt/bin" >> "$GITHUB_PATH"
+          echo "QMAKE=$qt/bin/qmake6" >> "$GITHUB_ENV"
+          # linuxdeploy resolves the binary's Qt libraries through the loader path, so
+          # aqt's Qt has to be discoverable there while the AppDir is assembled.
+          echo "LD_LIBRARY_PATH=$qt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked -p taffle-gui
+      - name: Assemble the AppDir from the same three files the deb installs
+        # The binary, the desktop entry and the icon, laid out as an installed system.
+        # linuxdeploy reads the entry and the icon from here; everything Qt is bundled
+        # in beside them by the plugin step below.
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          cp target/release/taffle-gui AppDir/usr/bin/taffle-gui
+          cp packaging/linux/taffle-gui.desktop AppDir/usr/share/applications/
+          cp packaging/linux/taffle.svg AppDir/usr/share/icons/hicolor/scalable/apps/
+      - name: linuxdeploy bundles Qt and every linked library, then packs the AppImage
+        env:
+          # The chrome's QML is compiled into the executable as resources, so the plugin's
+          # import scanner is pointed at the same QML sources the build compiled and learns
+          # from their import lines which QtQuick modules and style plugins to bundle —
+          # the same reading macdeployqt and windeployqt are given on their lanes.
+          QML_SOURCES_PATHS: crates/taffle-gui/qml
+          # The plugin ships only the xcb platform by default; the smoke below runs
+          # offscreen, so that platform has to ride along too or the self-test would
+          # have no platform to boot at all.
+          EXTRA_PLATFORM_PLUGINS: libqoffscreen.so
+          # The appimage plugin takes the output name from this variable; there is no flag.
+          OUTPUT: taffle-gui-${{ needs.prepare.outputs.version }}-x86_64.AppImage
+        # linuxdeploy and its Qt plugin publish rolling `continuous` builds and nothing
+        # versioned, so the pin every other tool in this workflow gets is not to be had
+        # here; what stands in for it is the smoke below, which starts what these two
+        # packed rather than trusting that they packed it.
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt --output appimage \
+            --desktop-file AppDir/usr/share/applications/taffle-gui.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/taffle.svg
+      - name: Put the AppImage through the window's own smoke, with Qt's own build gone
+        # The AppImage is proven the only way a bundled Qt tree can be: started. The
+        # self-test boots the whole chrome, drives a fake batch through it and exits, so
+        # a library or a QML module linuxdeploy did not bundle fails here rather than on
+        # the first user's machine.
+        #
+        # Qt's own build is moved out of the way first and the loader path emptied: this
+        # job installed that Qt to compile against, and leaving it findable would let a
+        # library or an import the AppImage never got be resolved from there instead, and
+        # the run would pass on a machine no user has.
+        #
+        # No display server and a software scene graph, the pair the crate's own smoke
+        # test puts on the run. The Qt Quick Controls style is left at whatever the
+        # platform picks, where that test pins it to Basic: which style resolves is part
+        # of what the plugin had to bundle, and pinning Basic would pass with it missing.
+        #
+        # The runner is not asked to mount anything: told to extract itself and run, the
+        # AppImage proves its payload without a working FUSE being part of what is
+        # tested. Qt's messages are forced to stderr so the reason for a failed load is
+        # in this job's own output, and the bound is the same 30 seconds every other
+        # smoke in this workflow allows.
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_BACKEND: software
+          QT_FORCE_STDERR_LOGGING: "1"
+          LD_LIBRARY_PATH: ""
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mv "$HOME/Qt" "$HOME/Qt-build-only"
+          timeout 30 "./taffle-gui-$VERSION-x86_64.AppImage" --smoke
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ "${{ needs.prepare.outputs.is_release }}" != "true" ]; then exit 0; fi
+          gh release upload "v$VERSION" \
+            "taffle-gui-$VERSION-x86_64.AppImage" --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        # The glob is anchored to the program's own name: linuxdeploy and its plugin are
+        # AppImages sitting in this same directory, and a bare *.AppImage would carry
+        # the tools out with the artifact.
+        with: { name: appimage, path: "taffle-gui-*-x86_64.AppImage" }
+
   # macOS gets tarballs rather than packages: there is no system package manager to
   # install into, so each program has to be self-contained. The command carries its
   # libopus; the window is an app bundle, carrying that same libopus and the Qt it
@@ -651,7 +774,7 @@ jobs:
 
   checksums:
     if: needs.prepare.outputs.is_release == 'true'
-    needs: [prepare, deb, arch, macos, windows]
+    needs: [prepare, deb, arch, appimage, macos, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
