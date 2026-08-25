@@ -6,9 +6,21 @@
 # released .exe would fail to start with "VCRUNTIME140.dll not found". Linking
 # the CRT statically folds it into the executable.
 #
-# libopus is linked statically into the same binary on this target, so there is
-# no C runtime shared across a DLL boundary and nothing that could end up with
-# two of them.
+# The command line carries nothing beside it: libopus is linked statically into
+# that binary too, so no C runtime is shared across a DLL boundary there.
+#
+# The window is a mixed configuration, and this is what it actually ships. The
+# flag folds the CRT into taffle-gui.exe and into the C++ shims compiled beside
+# it, while the Qt DLLs the window carries are Microsoft's own build and link the
+# CRT dynamically — so the release lays the Visual C++ runtime DLLs down in the
+# install directory beside them. Two runtimes in one process is what Microsoft and
+# Qt both call unsupported: a heap block allocated inside Qt and released in this
+# code would be a cross-heap free. It is accepted for now on the evidence that the
+# packaged window boots the whole QML chrome and drives a batch through it — the
+# release lane installs it and runs that self-test against what the installer
+# left behind. The linkage is decided again once the first release dry run has
+# reported: either it stands as it is, or the window is built without this flag
+# and uses the runtime DLLs it already carries.
 #
 # Target-scoped: the Linux and macOS builds are unaffected.
 [target.x86_64-pc-windows-msvc]
