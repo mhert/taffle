@@ -211,6 +211,13 @@ pub mod qobject {
         #[cxx_name = "bookResult"]
         fn book_result(self: &Self, index: i32) -> QString;
 
+        /// Why the book at `index` stands without the picture it carried, and nothing at all
+        /// where it does not stand without one. A note beside a book that converted, never a
+        /// failure of it — which is why the row shows it apart from what the book came to.
+        #[qinvokable]
+        #[cxx_name = "bookCoverNote"]
+        fn book_cover_note(self: &Self, index: i32) -> QString;
+
         /// Converts every book that is waiting, the one being edited included; `false` where
         /// there is nothing to convert or the set was refused, which `panelError` then says.
         #[qinvokable]
@@ -517,6 +524,11 @@ impl qobject::TaffleApp {
     /// What the book at `index` is doing or came to, in words.
     pub fn book_result(&self, index: i32) -> QString {
         self.about(index, Book::result)
+    }
+
+    /// Why the book at `index` stands without the picture it carried.
+    pub fn book_cover_note(&self, index: i32) -> QString {
+        self.about(index, Book::cover_note)
     }
 
     /// Converts every book that is waiting, the one being edited included.
@@ -925,9 +937,18 @@ impl Book {
                 let played = Duration::from_secs(samples_done / u64::from(RATE));
                 format!("{} encoded", clock(played))
             }
-            BookState::Done { result_line } => result_line.clone(),
+            BookState::Done { result_line, .. } => result_line.clone(),
             BookState::Failed { message } => message.clone(),
             BookState::Cancelled => removed_note("the conversion was stopped"),
+        }
+    }
+
+    /// Why the book stands without the picture it carried, and nothing at all for a book that
+    /// stands with one — or that never got as far as looking.
+    fn cover_note(&self) -> String {
+        match &self.state {
+            BookState::Done { cover_note, .. } => cover_note.clone(),
+            _ => String::new(),
         }
     }
 
@@ -966,6 +987,10 @@ enum BookState {
     Done {
         /// What was written, how long it plays and how many chapters it holds.
         result_line: String,
+        /// Why the book stands without the picture it carried, or nothing at all. Held apart from
+        /// the line above because the row shows it in amber: it is a warning about a book that
+        /// converted, not part of what converting came to.
+        cover_note: String,
     },
     /// Did not convert.
     Failed {
@@ -1003,6 +1028,7 @@ fn finished(result: Result<taffle::JobOutcome, worker::BookFailure>) -> BookStat
     match result {
         Ok(outcome) => BookState::Done {
             result_line: report_line(&outcome),
+            cover_note: cover_note(&outcome),
         },
         Err(worker::BookFailure::Failed(chain)) => BookState::Failed {
             message: removed_note(&chain),
@@ -1013,10 +1039,12 @@ fn finished(result: Result<taffle::JobOutcome, worker::BookFailure>) -> BookStat
     }
 }
 
-/// What a converted book says: the line the command line prints for it, and the cover beside it.
+/// What a converted book says: the line the command line prints for it, and the cover beside it
+/// where one was written.
 ///
 /// The cover is a file beside the file, so it is a line of its own the way the command line writes
-/// it — either the picture that was written, or why the book stands without one.
+/// it. A cover that could *not* be written is no part of this: it is [`cover_note`], because it is
+/// a warning about a book that converted and this is what converting came to.
 fn report_line(outcome: &taffle::JobOutcome) -> String {
     let chapters = outcome.report.chapters.len();
     let plural = if chapters == 1 { "chapter" } else { "chapters" };
@@ -1029,11 +1057,22 @@ fn report_line(outcome: &taffle::JobOutcome) -> String {
     if let Some(cover) = &outcome.cover_path {
         lines.push(format!("wrote {}", cover.display()));
     }
-    if let Some(why) = &outcome.cover_error {
-        lines.push(format!("no cover was written: {why}"));
-    }
 
     lines.join("\n")
+}
+
+/// Why the book stands without the picture it carried, and nothing at all where it does not stand
+/// without one.
+///
+/// Kept apart from [`report_line`] so that the row can show it in the amber a warning is shown in:
+/// the book converted, and what a row says about a conversion that went through is green. A cover
+/// is a file beside the book and never the book itself, so a cover nothing could be made of is a
+/// note and never a failure.
+fn cover_note(outcome: &taffle::JobOutcome) -> String {
+    match &outcome.cover_error {
+        Some(why) => format!("no cover was written: {why}"),
+        None => String::new(),
+    }
 }
 
 /// `reason`, and what goes with every book that did not make it: the batch removes the file a
@@ -1209,6 +1248,7 @@ mod tests {
         let mut converted = book(&["a.mp3"], None);
         converted.state = BookState::Done {
             result_line: "wrote a.taf (0:30, 1 chapter)".to_owned(),
+            cover_note: String::new(),
         };
         // A book that has already converted stays in the queue, so the one job of this batch is
         // the second row — which is the whole reason a job's index is looked up and not used.
@@ -1263,6 +1303,13 @@ mod tests {
             "wrote out/book.taf (0:30, 1 chapter)\nwrote out/book.png"
         );
 
+        // A book that converted says so, and has nothing to say about a cover it wrote no note
+        // about.
+        assert_eq!(row(&with_cover, 0).cover_note(), "");
+    }
+
+    #[test]
+    fn a_cover_that_could_not_be_written_is_a_note_and_not_the_result() {
         let mut refused = outcome(1, Duration::from_secs(30));
         refused.cover_error = Some("the picture is a WEBP, which nothing here writes".to_owned());
         let mut without_cover = app(vec![book(&["a.mp3"], None)], vec![0]);
@@ -1271,12 +1318,17 @@ mod tests {
             result: Ok(refused),
         });
         // A cover that could not be written is a note beside a book that converted, never a
-        // failure of it.
+        // failure of it — so it is kept out of the result the row colours by state, which for a
+        // book that converted is green.
+        assert_eq!(row(&without_cover, 0).state.name(), "done");
         assert_eq!(
             row(&without_cover, 0).result(),
-            "wrote out/book.taf (0:30, 1 chapter)\nno cover was written: the picture is a WEBP, which nothing here writes"
+            "wrote out/book.taf (0:30, 1 chapter)"
         );
-        assert_eq!(row(&without_cover, 0).state.name(), "done");
+        assert_eq!(
+            row(&without_cover, 0).cover_note(),
+            "no cover was written: the picture is a WEBP, which nothing here writes"
+        );
     }
 
     #[test]

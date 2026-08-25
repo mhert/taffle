@@ -27,16 +27,23 @@ ItemDelegate {
         row.app.revision;
         row.app.bookProgress(row.index)
     }
+    // Why the book stands without the picture it carried, where it does. A line of its own rather
+    // than part of the result, because it is a warning about a book that converted.
+    readonly property string coverNote: {
+        row.app.revision;
+        row.app.bookCoverNote(row.index)
+    }
     // A book that has not run is a book to edit again; one that has is a result to read. The queue
     // does not move under a running batch either, so neither does anything on a row.
     readonly property bool waiting: row.stateName === "ready" && !row.app.converting
 
     // What a book came to, in the three colours it can come to it in. The palette names no colour
     // for a conversion that went wrong, so these are named here: converted, did not convert, and
-    // stopped because somebody said so.
+    // the amber of a book somebody stopped — which is the colour of the cover note as well,
+    // because neither of those two is a failure.
     readonly property color convertedColor: "#2e7d32"
     readonly property color failedColor: "#c62828"
-    readonly property color stoppedColor: "#b26a00"
+    readonly property color warningColor: "#b26a00"
 
     // A row that cannot be opened does not light up under the pointer as though it could.
     hoverEnabled: row.waiting
@@ -102,12 +109,23 @@ ItemDelegate {
                 case "failed":
                     return row.failedColor;
                 case "cancelled":
-                    return row.stoppedColor;
+                    return row.warningColor;
                 // A running book says how much audio is in, which is no verdict on anything.
                 default:
                     return palette.text;
                 }
             }
+        }
+
+        Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            // A cover is a file beside the book and never the book itself, so a cover that could
+            // not be written is a note on a book that converted: amber, and apart from the green
+            // line above saying what the conversion came to.
+            visible: row.coverNote !== ""
+            text: row.coverNote
+            color: row.warningColor
         }
     }
 }
