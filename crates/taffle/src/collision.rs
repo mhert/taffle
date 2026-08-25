@@ -98,6 +98,19 @@ mod tests {
     }
 
     #[test]
+    fn a_job_writing_what_another_job_reads_is_refused() {
+        // Neither job collides with itself: the first writes the derived a.taf and reads a.mp3,
+        // the second writes b.taf and reads a.taf. Only holding the whole set in one hand sees
+        // that the file the second one reads is the file the first one is about to empty.
+        let jobs = [job(&["a.mp3"], None), job(&["a.taf"], Some("b.taf"))];
+        let error = refuse_collisions(&jobs).expect_err("a collision");
+        assert_eq!(
+            error.to_string(),
+            "the output a.taf is one of the inputs: converting it would write over the audio being read"
+        );
+    }
+
+    #[test]
     fn two_jobs_writing_one_output_are_refused() {
         // The second job states no output, so its collision is with the first job's *derived* name.
         let jobs = [
