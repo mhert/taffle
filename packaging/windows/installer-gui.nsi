@@ -7,12 +7,49 @@ OutFile "taffle-gui-${VERSION}-x86_64-setup.exe"
 InstallDir "$PROGRAMFILES64\taffle-gui"
 RequestExecutionLevel admin
 
-Page directory
+Page directory "" "" VerifyInstDirIsOurs
 Page instfiles
 UninstPage uninstConfirm
 UninstPage instfiles
 ShowInstDetails show
 ShowUninstDetails show
+
+; The directory chosen here becomes this program's own: uninstalling takes it back as a whole
+; tree, and the only question the uninstaller asks about it is whether taffle-gui.exe is in it.
+; So a directory belongs to this install if it does not exist yet, if it is empty, or if it
+; already holds taffle-gui.exe — that last one being what lets an existing install be reinstalled
+; or upgraded in place. Anything else is somebody else's directory: C:\Program Files itself, or a
+; folder of documents. Installing into one of those would leave taffle-gui.exe in it, and that is
+; the one thing the uninstaller looks for before it removes everything around it, so the refusal
+; has to come before the first file is written rather than at uninstall time.
+;
+; A leave function on the directory page, not .onVerifyInstDir: NSIS runs .onVerifyInstDir on
+; every keystroke and its documentation says such a function must not put up a MessageBox, so the
+; most it could do is grey the Next button out and leave the user to guess why. A leave function
+; runs once, when Next is pressed, where the reason can be said out loud and Abort keeps the user
+; on the page with the directory still theirs to change. Neither mechanism runs in a silent
+; install, which shows no pages at all: an installer run with /S takes the directory it is given.
+Function VerifyInstDirIsOurs
+  IfFileExists "$INSTDIR\taffle-gui.exe" install_here
+  IfFileExists "$INSTDIR\*.*" 0 install_here
+
+  ; Every directory but a drive root lists "." and ".." of its own, so an empty one is the search
+  ; that turns up nothing besides those two.
+  FindFirst $0 $1 "$INSTDIR\*.*"
+  next_entry:
+    StrCmp $1 "" dir_is_empty
+    StrCmp $1 "." skip_entry
+    StrCmp $1 ".." skip_entry
+      FindClose $0
+      MessageBox MB_OK|MB_ICONSTOP "Taffle will not install into $INSTDIR, because that folder already holds files that are not part of a Taffle installation, and uninstalling Taffle deletes its folder with everything in it. Please choose an empty folder or a new one."
+      Abort
+    skip_entry:
+    FindNext $0 $1
+    Goto next_entry
+  dir_is_empty:
+  FindClose $0
+  install_here:
+FunctionEnd
 
 ; Nothing here touches the machine PATH, where the command-line installer beside this one
 ; has to: a window is started from its Start-menu shortcut and never typed at a prompt, so
