@@ -20,6 +20,13 @@ ShowUninstDetails show
 ; search. That also leaves this installer with nothing to run PowerShell for.
 
 Section "Install"
+  ; NSIS builds this installer against a 32-bit stub, and a 32-bit program on 64-bit Windows reads
+  ; and writes the 32-bit view of the registry: every key below would land under WOW6432Node
+  ; instead, where Settings > Apps and every other 64-bit reader of the uninstall list will not
+  ; look. Choosing a view Windows does not have fails every registry call, and that cannot happen
+  ; here: this installs an x86_64 program into $PROGRAMFILES64, so it only runs on 64-bit Windows.
+  SetRegView 64
+
   SetOutPath "$INSTDIR"
   ; The staged tree goes in whole rather than file by file. windeployqt fills it with the Qt
   ; libraries, the platform and image plugins and the QML modules the chrome imports:
@@ -49,6 +56,21 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+  ; The view the install wrote in. Left at the 32-bit default, the DeleteRegKey below would look
+  ; under Software\WOW6432Node, find nothing, and leave the entry in Settings > Apps behind.
+  SetRegView 64
+
+  ; In an uninstaller $INSTDIR is not what the directory page was set to: it is the directory the
+  ; uninstaller is run from, and the documented _?= switch overrides even that. A copy of
+  ; uninstall.exe carried into a downloads folder or the root of a drive would therefore aim the
+  ; recursive delete below at that directory, and a recursive delete cannot be taken back. So the
+  ; uninstall runs only where the program it removes actually is; anywhere else it says so and
+  ; stops before touching anything, leaving the install whole and removable from where it was put.
+  IfFileExists "$INSTDIR\taffle-gui.exe" dir_is_ours
+    DetailPrint "Taffle: $INSTDIR holds no taffle-gui.exe, so this uninstaller will not remove it."
+    Abort
+  dir_is_ours:
+
   Delete "$SMPROGRAMS\Taffle.lnk"
 
   ; Taken back as a tree, where the command-line installer deletes the three files it wrote

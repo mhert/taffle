@@ -428,6 +428,49 @@ jobs:
           cp target/release/taffle-gui.exe stage-gui/taffle-gui.exe
           cp LICENSE README.md stage-gui/
           windeployqt --qmldir crates/taffle-gui/qml --no-translations stage-gui/taffle-gui.exe
+      - name: Put the MSVC runtime beside the window
+        shell: bash
+        # crt-static folds that runtime into the command-line binary; it cannot do the same here,
+        # because the Qt libraries staged above are Microsoft's own build and link it dynamically.
+        # A Windows that has never had a Visual Studio redistributable installed therefore cannot
+        # start the window -- and nothing else in this job would notice, because this runner has
+        # the redistributable and finds those DLLs in System32. Microsoft allows the same DLLs to
+        # be deployed in an application's own directory, which is what happens here: Windows
+        # searches the directory of the running executable ahead of System32, and that is
+        # taffle-gui.exe's directory for every DLL in the tree, plugins included, so one copy
+        # beside it serves all of them.
+        run: |
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          redist="$(cygpath -u "$("$vswhere" -latest -property installationPath | tr -d '\r')")/VC/Redist/MSVC"
+          # One directory per toolset the installation carries; the newest is taken because the
+          # 140-series runtime is binary compatible across Visual Studio 2015 through 2022, so it
+          # serves both what this runner's compiler built and the Qt an older toolset built.
+          crt=$(find "$redist" -maxdepth 3 -type d -path '*/x64/Microsoft.VC[0-9][0-9][0-9].CRT' 2>/dev/null | sort -V | tail -1) || true
+          if [ -z "$crt" ]; then
+            echo "::error::no Microsoft.VC<n>.CRT directory under $redist, so there is no runtime to put beside the window"
+            exit 1
+          fi
+          # Which DLLs to carry is read off the staged tree rather than left to a fixed list, so a
+          # Qt that reaches for one more cannot leave it behind: a PE names every DLL it imports in
+          # plain ASCII, the same reading that proves the command-line binary names none of them.
+          imported=$(find stage-gui \( -name '*.dll' -o -name '*.exe' \) \
+            -exec grep -aoih '\(msvcp\|vcruntime\|concrt\)[0-9][0-9a-z_]*\.dll' {} + \
+            | tr 'A-Z' 'a-z' | sort -u) || true
+          if [ -z "$imported" ]; then
+            echo "::error::nothing staged names a runtime DLL at all, so that reading found nothing and proves nothing"
+            exit 1
+          fi
+          # The three Qt's Windows libraries import are named outright as well: a reading that
+          # ever stopped recognising the tree would otherwise take the runtime out with it.
+          carried=$(printf '%s\n' vcruntime140.dll vcruntime140_1.dll msvcp140.dll $imported | sort -u)
+          for dll in $carried; do
+            if [ ! -f "$crt/$dll" ]; then
+              echo "::error::the staged tree needs $dll and $crt does not have it to give"
+              exit 1
+            fi
+            cp "$crt/$dll" stage-gui/
+          done
+          echo "from $crt, the window now carries:" $carried
       - name: Zip
         shell: bash
         # Each archive is named for the package it carries, and each installer for the package
@@ -478,9 +521,16 @@ jobs:
           Start-Process -Wait "taffle-gui-$env:VERSION-x86_64-setup.exe" -ArgumentList "/S"
           $key = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\taffle-gui"
           if (-not (Test-Path $key)) { throw "the installer wrote no uninstall entry, so Settings > Apps would not list the install" }
+          # The shortcut is asserted for the same reason as the entry above: it is the only way in
+          # to a program this installer deliberately keeps off PATH. The installer writes it into
+          # the Start menu of the account that ran it, which is the account running this step.
+          $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Taffle.lnk"
+          if (-not (Test-Path $lnk)) { throw "the installer left no shortcut at $lnk, so a user would have nothing to start the window with" }
           # This job put Qt's own bin directory on PATH to build against. Leaving it there would
           # let a DLL the installer never laid down be found in that install instead, and the
-          # run would pass on a machine no user has.
+          # run would pass on a machine no user has. An unset QT_BIN would leave that filter
+          # matching nothing while still looking like it ran, so it is checked rather than trusted.
+          if (-not $env:QT_BIN) { throw "QT_BIN is unset, so the filter below would take nothing off PATH and Qt's own build would still be on it" }
           $env:PATH = (($env:PATH -split ';') | Where-Object { $_ -ne $env:QT_BIN }) -join ';'
           # No display server and a software scene graph, the pair the crate's own smoke test
           # puts on the run. The Qt Quick Controls style is left at whatever the platform picks,
