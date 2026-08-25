@@ -172,8 +172,10 @@ jobs:
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       # The version must be identical in the manifest and the one packaging file
-      # that carries it committed (Windows and Debian take theirs from the build
-      # command). This catches a hand-edit that bumps one but forgets the other.
+      # whose committed version is the released one (Windows, Debian and the macOS
+      # app bundle take theirs from the build command; the bundle's plist carries
+      # only a 0.0.0 placeholder for that command to write over). This catches a
+      # hand-edit that bumps one but forgets the other.
       - name: packaging and manifest versions agree
         run: |
           manifest="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"

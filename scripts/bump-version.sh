@@ -2,11 +2,14 @@
 # Advance the workspace version (Semantic Versioning) in every place it is committed:
 #   Cargo.toml  [workspace.package] version  — the source of truth (all crates inherit it)
 #   Cargo.lock  workspace-member entries      — synced with `cargo update --workspace`
-#   packaging/arch/PKGBUILD  pkgver=          — the only packaging file with a committed version
+#   packaging/arch/PKGBUILD  pkgver=          — the only packaging file whose committed
+#                                              version is the one that is released
 #
 # Windows (installer.nsi), Debian and the macOS app bundle (packaging/macos/Info.plist)
 # take their version from the build command (-DVERSION / cargo deb --deb-version /
-# plutil -replace), so they have nothing committed to bump.
+# plutil -replace), so they have nothing to bump. The plist does carry a committed
+# CFBundleShortVersionString, but it is a 0.0.0 placeholder the release writes over —
+# plutil -replace needs a key already in the file — and it is never read as a version.
 #
 # Usage: scripts/bump-version.sh <patch|minor|major>
 # Prints the new X.Y.Z on stdout. Acts on files relative to the current directory;
