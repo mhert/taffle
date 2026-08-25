@@ -298,12 +298,18 @@ jobs:
             PKGBUILD
             *.pkg.tar.zst
 
-  # macOS gets a tarball rather than a package: there is no system package manager
-  # to install into, so the binary has to be self-contained and carry its libopus.
+  # macOS gets tarballs rather than packages: there is no system package manager to
+  # install into, so each program has to be self-contained. The command carries its
+  # libopus; the window is an app bundle, carrying that same libopus and the Qt it
+  # draws itself with.
   macos:
     needs: prepare
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # 60 rather than the 45 this job held while it built the command line alone: it now
+    # installs a Qt as well, compiles the frontend's cxx-qt shim layer — generated C++,
+    # moc, and the QML module — against it, and deploys that Qt into a bundle. The Windows
+    # job builds the same two programs and is given the same hour.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -319,38 +325,110 @@ jobs:
         run: |
           brew install opus pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - name: Install Qt 6.7.2 via aqt
+        # Qt's own binaries rather than anything the runner ships: the frontend's build script
+        # compiles its QML module against them, and macdeployqt below copies them into the
+        # bundle. 6.7.2 is the version the frontend was developed against. No LD_LIBRARY_PATH
+        # counterpart is needed: linking against Qt's frameworks records an rpath into this
+        # prefix, so the build's own binary finds them wherever it is started from.
+        run: |
+          pipx install aqtinstall
+          # pipx installs its entry points into PIPX_BIN_DIR, which this image puts on PATH
+          # for interactive shells only — and a workflow step is not one. Ask pipx where it
+          # put aqt rather than hoping the directory is on PATH.
+          "$(pipx environment --value PIPX_BIN_DIR)/aqt" \
+            install-qt mac desktop 6.7.2 clang_64 -O "$HOME/Qt"
+          qt=$(ls -d "$HOME"/Qt/6.7.2/*/); qt="${qt%/}"
+          echo "$qt/bin" >> "$GITHUB_PATH"
+          echo "QMAKE=$qt/bin/qmake6" >> "$GITHUB_ENV"
       - name: Build
-        # LIBOPUS_STATIC folds Homebrew's libopus.a into the binary. Without it the
-        # tarball would only run on a machine that happens to have Homebrew's opus
-        # installed at the same prefix.
+        # LIBOPUS_STATIC folds Homebrew's libopus.a into both binaries. Without it a tarball
+        # would only run on a machine that happens to have Homebrew's opus installed at the
+        # same prefix.
         env:
           LIBOPUS_STATIC: "1"
-        run: cargo build --release --locked -p taffle-cli
-      - name: The binary carries its libopus rather than expecting one
+        run: cargo build --release --locked -p taffle-cli -p taffle-gui
+      - name: Both binaries carry their libopus rather than expecting one
+        # The window links Qt as frameworks by design and carries a copy of them below, but it
+        # decodes Opus through the same static library the command does, so it is held to the
+        # same reading: a program that unpacks cleanly and then cannot decode a thing is the
+        # worse failure of the two, because it reaches the user rather than the build.
         run: |
-          otool -L target/release/taffle
-          if otool -L target/release/taffle | grep -qi opus; then
-            echo "::error::the binary still links libopus dynamically"
-            exit 1
-          fi
-      - name: Stage
+          for binary in target/release/taffle target/release/taffle-gui; do
+            otool -L "$binary"
+            if otool -L "$binary" | grep -qi opus; then
+              echo "::error::$binary still links libopus dynamically"
+              exit 1
+            fi
+          done
+      - name: Stage the command line
         run: |
           mkdir -p stage
           cp target/release/taffle stage/taffle
           cp LICENSE README.md stage/
       - name: Convert real audio with the staged binary
         run: sh scripts/smoke.sh ./stage/taffle
+      - name: Assemble Taffle.app and let macdeployqt bundle the Qt it needs
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        # An app bundle is what macOS takes a window to be: a directory holding the binary, the
+        # icon, and the Info.plist naming both, which Finder shows as the one Taffle a user drags
+        # into /Applications. The committed plist carries a 0.0.0 placeholder and plutil writes
+        # the version being released over it — which is why that placeholder has to be a key
+        # already in the file rather than a token to substitute: -replace has nothing to replace
+        # otherwise.
+        #
+        # macdeployqt copies the Qt frameworks the binary links into Contents/Frameworks and
+        # rewrites its load paths to reach them there. What it cannot read off a binary is QML:
+        # the chrome's modules are compiled into the executable as resources, so -qmldir points
+        # it at the same QML sources the build compiled and it learns from their import lines
+        # which QtQuick modules and style plugins to bundle.
+        run: |
+          app="stage-gui/Taffle.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp packaging/macos/Info.plist "$app/Contents/Info.plist"
+          plutil -replace CFBundleShortVersionString -string "$VERSION" "$app/Contents/Info.plist"
+          cp target/release/taffle-gui "$app/Contents/MacOS/taffle-gui"
+          cp packaging/linux/taffle.icns "$app/Contents/Resources/taffle.icns"
+          cp LICENSE README.md stage-gui/
+          macdeployqt "$app" -qmldir=crates/taffle-gui/qml
+      - name: Put the bundle through the window's own smoke, with Qt's own build gone
+        # The window is proven the only way a bundled Qt tree can be: started. The self-test
+        # boots the whole chrome, drives a fake batch through it and exits, so a framework or a
+        # QML module macdeployqt did not bundle fails here rather than on the first user's
+        # machine.
+        #
+        # Qt's own build is moved out of the way first, and nothing after this step wants it
+        # back. This job installed it to compile against; leaving it where the binary was linked
+        # to find it would let a framework or an import the bundle never got be resolved from
+        # there instead, and the run would pass on a machine no user has.
+        #
+        # No display server and a software scene graph, the pair the crate's own smoke test puts
+        # on the run. The Qt Quick Controls style is left at whatever the platform picks, where
+        # that test pins it to Basic: which style macOS resolves to is part of what macdeployqt
+        # had to bundle, and pinning Basic would pass with it missing.
+        run: |
+          mv "$HOME/Qt" "$HOME/Qt-build-only"
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+            stage-gui/Taffle.app/Contents/MacOS/taffle-gui --smoke
       - name: Tar
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: tar -czf "taffle-$VERSION-${{ matrix.arch }}-macos.tar.gz" -C stage .
+        # Each archive is named for the program it carries, so the two macOS files on a release
+        # page say which is which. Only the name changed for the command line: the archive holds
+        # what it always held, and unpacks the same way.
+        run: |
+          tar -czf "taffle-cli-$VERSION-${{ matrix.arch }}-macos.tar.gz" -C stage .
+          tar -czf "taffle-gui-$VERSION-${{ matrix.arch }}-macos.tar.gz" -C stage-gui .
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           if [ "${{ needs.prepare.outputs.is_release }}" != "true" ]; then exit 0; fi
-          gh release upload "v$VERSION" "taffle-$VERSION-${{ matrix.arch }}-macos.tar.gz" --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload "v$VERSION" \
+            "taffle-cli-$VERSION-${{ matrix.arch }}-macos.tar.gz" \
+            "taffle-gui-$VERSION-${{ matrix.arch }}-macos.tar.gz" --repo "${GITHUB_REPOSITORY}" --clobber
       - if: needs.prepare.outputs.is_release != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "macos-${{ matrix.arch }}", path: "taffle-*-macos.tar.gz" }

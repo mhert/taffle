@@ -4,8 +4,9 @@
 #   Cargo.lock  workspace-member entries      — synced with `cargo update --workspace`
 #   packaging/arch/PKGBUILD  pkgver=          — the only packaging file with a committed version
 #
-# Windows (installer.nsi) and Debian take their version from the build command
-# (-DVERSION / cargo deb --deb-version), so they have nothing committed to bump.
+# Windows (installer.nsi), Debian and the macOS app bundle (packaging/macos/Info.plist)
+# take their version from the build command (-DVERSION / cargo deb --deb-version /
+# plutil -replace), so they have nothing committed to bump.
 #
 # Usage: scripts/bump-version.sh <patch|minor|major>
 # Prints the new X.Y.Z on stdout. Acts on files relative to the current directory;

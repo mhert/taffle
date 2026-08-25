@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>            <string>Taffle</string>
+    <key>CFBundleDisplayName</key>     <string>Taffle</string>
+    <key>CFBundleIdentifier</key>      <string>cx.mh.taffle</string>
+    <key>CFBundleExecutable</key>      <string>taffle-gui</string>
+    <key>CFBundleIconFile</key>        <string>taffle</string>
+    <key>CFBundlePackageType</key>     <string>APPL</string>
+    <!-- A placeholder, not a version this repository keeps up to date: the release lane writes
+         the version it is building over it with `plutil -replace`, so nothing has to bump it
+         here, and a bundle assembled without that step is plainly unversioned rather than
+         quietly claiming a version it is not. -->
+    <key>CFBundleShortVersionString</key> <string>0.0.0</string>
+    <key>NSHighResolutionCapable</key> <true/>
+</dict>
+</plist>

@@ -11,21 +11,23 @@ wrote book.taf (1:04:12, 16 chapters)
 wrote book.jpg
 ```
 
+The same engine has a window over it — **Taffle** — which takes a whole batch of books,
+keeps each one's options its own, and converts them in parallel.
+
 ## Install
 
-Every release carries a package for each platform, on the
-[releases page](https://github.com/mhert/taffle/releases). `SHA256SUMS` beside them
-covers every file in the release; download it next to whatever you took and check
-what arrived before installing it:
+Every release carries both programs for each platform, on the
+[releases page](https://github.com/mhert/taffle/releases): `taffle-cli` is the command,
+`taffle-gui` is the window. `SHA256SUMS` beside them covers every file in the release;
+download it next to whatever you took and check what arrived before installing it:
 
 ```sh
 sha256sum --ignore-missing -c SHA256SUMS
 # macOS ships no sha256sum: shasum -a 256 --ignore-missing -c SHA256SUMS
 ```
 
-**Debian and Ubuntu** — two packages per distro, each linking that distro's own libopus:
-`taffle-cli` is the command, `taffle-gui` is the window. Install either or both, and take the
-files built for the distro you are on:
+**Debian and Ubuntu** — two packages per distro, each linking that distro's own libopus.
+Install either or both, and take the files built for the distro you are on:
 
 ```sh
 sudo apt install ./taffle-cli_<version>_amd64_debian13.deb
@@ -42,18 +44,30 @@ sudo pacman -U taffle-cli-<version>-1-x86_64.pkg.tar.zst
 sudo pacman -U taffle-gui-<version>-1-x86_64.pkg.tar.zst
 ```
 
-**macOS** — a tarball for each architecture, carrying its own libopus, so nothing
-needs installing alongside it. The archive also carries the license and readme next
-to the binary, so unpack it into a directory of its own rather than the current one:
+**macOS** — a tarball per program and architecture, each carrying its own libopus, so
+nothing needs installing alongside it. The window ships as `Taffle.app`, which carries
+the Qt it draws itself with as well: unpack it, clear the quarantine macOS tags a
+download with, and drag it into `/Applications`.
 
 ```sh
-mkdir -p taffle && tar -xzf taffle-<version>-aarch64-macos.tar.gz -C taffle
-sudo mv taffle/taffle /usr/local/bin/
+mkdir -p taffle-gui && tar -xzf taffle-gui-<version>-aarch64-macos.tar.gz -C taffle-gui
+xattr -cr taffle-gui/Taffle.app
+mv taffle-gui/Taffle.app /Applications/
 ```
 
-That leaves `taffle/` holding the license and the readme, to keep or delete as you
-like. The binaries are unsigned, so Gatekeeper will hold one back on first run:
-`sudo xattr -c /usr/local/bin/taffle` clears it.
+The command is the tarball beside it, and goes wherever you keep your binaries:
+
+```sh
+mkdir -p taffle && tar -xzf taffle-cli-<version>-aarch64-macos.tar.gz -C taffle
+sudo mv taffle/taffle /usr/local/bin/
+sudo xattr -c /usr/local/bin/taffle
+```
+
+Both archives carry the license and the readme beside the program, which is why each
+unpacks into a directory of its own rather than the current one; what is left in there
+is yours to keep or delete. Neither is signed, so Gatekeeper holds back what it has not
+been told about — the two `xattr` lines are that telling. The command-line archive was
+named `taffle-<version>-…` in earlier releases; what it holds has not changed.
 
 **Windows** — two installers, one per program. `taffle-gui-<version>-x86_64-setup.exe`
 is the window, and the one to take if you would rather click than type: it carries the
@@ -67,11 +81,12 @@ installers are unsigned, so SmartScreen will warn on first run.
 
 ### From source
 
-From a clone of this repository, this builds the binary and puts it in
+From a clone of this repository, this builds either program and puts it in
 `~/.cargo/bin`:
 
 ```sh
 cargo install --path crates/taffle-cli
+cargo install --path crates/taffle-gui
 ```
 
 Building needs a C toolchain and **libopus** — `libopus-dev` on Debian and Ubuntu,
@@ -79,6 +94,15 @@ Building needs a C toolchain and **libopus** — `libopus-dev` on Debian and Ubu
 `pkg-config` and fall back to building their own vendored copy with CMake, which is
 slower and wants a CMake older than 4; installing the system library is the shorter
 road. Nothing is needed at runtime — a released binary carries what it needs.
+
+The window needs **Qt 6** on top of that, the development files rather than the
+libraries alone: its build script compiles the chrome into a QML module, and finds Qt
+through `qmake6` (or `qmake`) on `PATH`. That is `qt6-base-dev` and `qt6-declarative-dev`
+on Debian and Ubuntu, `qt6-base` and `qt6-declarative` on Arch, `qt` on Homebrew. Qt is
+needed where the window runs, too, for the QtQuick modules its chrome imports: Arch and
+Homebrew ship those in the same packages, Debian and Ubuntu split them into
+`qml6-module-qtquick*` packages of their own, and the `taffle-gui` deb names every one it
+loads.
 
 ## Usage
 
@@ -210,6 +234,7 @@ if every file validated — structure *and* SHA-1.
 | [`taf-encode`](crates/taf-encode) | The conversion engine: decode (symphonia, libopus), resample to 48 kHz stereo, trim and pad silence, resolve chapters, encode Opus across every core into `taf`'s writer — deterministically: the file is the audio's, not the machine's. |
 | [`taffle`](crates/taffle) | The application layer a frontend sits on: paths, the output name, the cover beside the file, progress — and reading a TAF back, block by block, to say whether it holds. |
 | [`taffle-cli`](crates/taffle-cli) | The `taffle` binary — argument parsing, progress, error rendering, and nothing else. |
+| [`taffle-gui`](crates/taffle-gui) | The Qt dialog on the same application layer: a batch of books, each its own options, converted in parallel. |
 
 `crates/taf/FORMAT.md` describes the file format in full and cites teddycloud for
 every constant it states.
