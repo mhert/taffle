@@ -341,8 +341,22 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let calls = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel();
+        // A cancelled job has its output removed, so the outputs are named under a directory of
+        // this test's own: named relatively they would be whatever a.taf and b.taf stand for in
+        // the directory `cargo test` runs in, and the run would delete them.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let output = |stem: &str| {
+            dir.path()
+                .join(stem)
+                .to_str()
+                .expect("utf-8 temp path")
+                .to_owned()
+        };
         run_batch(
-            &[job("a.mp3", "a.taf"), job("b.mp3", "b.taf")],
+            &[
+                job("a.mp3", &output("a.taf")),
+                job("b.mp3", &output("b.taf")),
+            ],
             1,
             &cancel,
             |_job, progress| {
