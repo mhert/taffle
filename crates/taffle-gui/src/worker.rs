@@ -63,12 +63,12 @@ type Convert<'a> = &'a dyn Fn(
     &mut dyn FnMut(taffle::Progress) -> ControlFlow<()>,
 ) -> Result<taffle::JobOutcome, taffle::JobError>;
 
-/// Runs every job, at most `cap` at once. Workers hand their events over one internal channel and
-/// the calling thread drains it through `deliver` — so delivery is single-threaded and in arrival
-/// order, and `deliver` needs no thread-safety of its own. A raised `cancel` stops running jobs
-/// between chunks and keeps waiting ones from starting; the partial file of a failed or cancelled
-/// job is removed best-effort before it is reported. Returns once every job is reported and
-/// [`Event::BatchDone`] was delivered.
+/// Runs every job, at most `cap` at once and never fewer than one at a time. Workers hand their
+/// events over one internal channel and the calling thread drains it through `deliver` — so
+/// delivery is single-threaded and in arrival order, and `deliver` needs no thread-safety of its
+/// own. A raised `cancel` stops running jobs between chunks and keeps waiting ones from starting;
+/// the partial file of a failed or cancelled job is removed best-effort before it is reported.
+/// Returns once every job is reported and [`Event::BatchDone`] was delivered.
 pub fn run_batch<C, D>(
     jobs: &[taffle::ConvertJob],
     cap: usize,
@@ -89,8 +89,10 @@ pub fn run_batch<C, D>(
     let (events, arrivals) = mpsc::channel();
 
     std::thread::scope(|scope| {
-        // More workers than books would be threads with nothing to pull.
-        for _ in 0..cap.min(jobs.len()) {
+        // More workers than books would be threads with nothing to pull; fewer than one would be
+        // a batch that converts nothing and then reports itself finished, which is the one answer
+        // a caller cannot tell from a batch that ran.
+        for _ in 0..cap.max(1).min(jobs.len()) {
             let events = events.clone();
             let (next, convert) = (&next, &convert);
             scope.spawn(move || loop {
@@ -298,6 +300,32 @@ mod tests {
             }),
             all
         );
+        assert!(matches!(events.last(), Some(Event::BatchDone)));
+    }
+
+    #[test]
+    fn a_batch_of_no_workers_is_still_converted() {
+        // A cap of nothing would leave every book unconverted while the batch reported itself
+        // finished, which is the one answer a caller cannot tell from a batch that ran.
+        let converted = AtomicUsize::new(0);
+        let (tx, rx) = mpsc::channel();
+        run_batch(
+            &[job("a.mp3", "a.taf")],
+            0,
+            &AtomicBool::new(false),
+            |job, _progress| {
+                converted.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_outcome(&job))
+            },
+            |event| tx.send(event).unwrap(),
+        );
+        assert_eq!(
+            converted.load(Ordering::SeqCst),
+            1,
+            "the one job of a batch"
+        );
+        let events: Vec<Event> = rx.try_iter().collect();
+        assert!(matches!(events.first(), Some(Event::Started { index: 0 })));
         assert!(matches!(events.last(), Some(Event::BatchDone)));
     }
 
