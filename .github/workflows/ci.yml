@@ -45,7 +45,7 @@ jobs:
       # Qt's development files and the qmake6 they carry, plus the qml6 modules its QML
       # imports. Ubuntu's 6.4 is the oldest Qt that compiles at all: below it cxx-qt-lib
       # drops the load-failure signal the boot connects. Running the chrome offscreen is
-      # what wants a newer Qt, and that happens in the test lanes.
+      # what the newer Qt is pinned for, and that happens in the test lanes.
       - run: |
           sudo apt-get update
           sudo apt-get install -y libopus-dev \
@@ -101,11 +101,16 @@ jobs:
         run: |
           brew install opus pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
-      # Qt's own 6.7.2 binaries rather than whatever the platform ships: Ubuntu's Qt 6.4
-      # hangs an offscreen QtQuick boot on a headless runner, and 6.7.2 is the version the
-      # frontend was developed against. Nothing here sets QT_QPA_PLATFORM or
-      # QT_QUICK_BACKEND — the smoke test puts both on the child it spawns, so that run is
-      # the same on a bare runner as on a desktop.
+      # Qt's own 6.7.2 binaries rather than whatever the platform ships: it is the version
+      # the frontend was developed against, and a different Qt/QML chrome was seen hanging an
+      # offscreen QtQuick boot on a headless runner under Ubuntu's Qt 6.4.2. That hang is an
+      # observation from that other chrome; this one has never been put to a distro Qt in
+      # these lanes. What tests it is the release lane, which installs the Ubuntu package and
+      # runs this very self-test against the distro's Qt 6.4 under a 30-second bound — so the
+      # first release dry run is what settles whether the pin is a version preference or a
+      # requirement. Nothing here sets QT_QPA_PLATFORM or QT_QUICK_BACKEND — the smoke test
+      # puts both on the child it spawns, so that run is the same on a bare runner as on a
+      # desktop.
       - name: Install Qt 6.7.2 via aqt (Linux)
         if: runner.os == 'Linux'
         # aqt ships only Qt's own binaries, so install the system libraries QtGui and

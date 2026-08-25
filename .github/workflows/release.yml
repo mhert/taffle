@@ -217,6 +217,11 @@ jobs:
           # style is not what decides this lane. The bound is the same 30 seconds that test allows
           # the run, so a boot that never finishes fails here instead of sitting until the job's
           # own ceiling with nothing said.
+          #
+          # This is also the only place a distro Qt runs this chrome at all — the CI test lanes
+          # pin Qt's own 6.7.2 against a hang seen on a different frontend under Ubuntu's 6.4.2 —
+          # so what comes back here, on the first dry run, is what says whether that pin is a
+          # version preference or a requirement.
           QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_QUICK_CONTROLS_STYLE=Basic \
             QT_FORCE_STDERR_LOGGING=1 timeout 30 taffle-gui --smoke
       - name: Upload
