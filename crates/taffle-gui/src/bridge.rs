@@ -73,9 +73,13 @@ pub mod qobject {
 
         /// Moves the file at `from` to `to`. The inputs play in the order they are listed and
         /// each of them begins a chapter, so this is what the order of a book is edited with.
+        ///
+        /// Answers where the row at `current` sits once the move is done, which is what the list
+        /// keeps its selection on: the file somebody picked is the file Remove takes out, however
+        /// the list was reordered under it.
         #[qinvokable]
         #[cxx_name = "moveFile"]
-        fn move_file(self: Pin<&mut Self>, from: i32, to: i32);
+        fn move_file(self: Pin<&mut Self>, from: i32, to: i32, current: i32) -> i32;
 
         /// The file at `index`, as it was named.
         #[qinvokable]
@@ -278,14 +282,14 @@ impl qobject::TaffleApp {
         self.as_mut().refresh();
     }
 
-    /// Moves the file at `from` to `to`.
-    pub fn move_file(mut self: Pin<&mut Self>, from: i32, to: i32) {
+    /// Moves the file at `from` to `to`, and answers where the row at `current` sits afterwards.
+    pub fn move_file(mut self: Pin<&mut Self>, from: i32, to: i32, current: i32) -> i32 {
         let count = self.rust().panel.files.len();
         let (Some(from), Some(to)) = (row_of(from, count), row_of(to, count)) else {
-            return;
+            return current;
         };
         if from == to {
-            return;
+            return current;
         }
         {
             let mut rust = self.as_mut().rust_mut();
@@ -296,6 +300,8 @@ impl qobject::TaffleApp {
             rust.panel_durations.insert(to, length);
         }
         self.as_mut().refresh();
+
+        moved_index(current, from, to)
     }
 
     /// The file at `index`, as it was named.
@@ -1198,6 +1204,34 @@ fn row_of(index: i32, count: usize) -> Option<usize> {
     (at < count).then_some(at)
 }
 
+/// Where the row at `current` sits once the row at `from` has been taken out and put back in at
+/// `to`, both of which are rows of the list.
+///
+/// The row that was moved is picked wherever it lands, and every row the move stepped over shifts
+/// by one — towards the end where the move went backwards, towards the start where it went
+/// forwards. A row outside the two ends is not touched at all, and a list with nothing picked has
+/// nothing to move. Simply picking the row that was dropped would be right only where that row was
+/// the picked one, and would quietly aim Remove at another file in every other case.
+fn moved_index(current: i32, from: usize, to: usize) -> i32 {
+    let Ok(at) = usize::try_from(current) else {
+        return current;
+    };
+
+    let landed = if at == from {
+        to
+    } else if from < at && at <= to {
+        // Everything the row was lifted out from above closes up by one.
+        at - 1
+    } else if to <= at && at < from {
+        // Everything it was put back in above is pushed down by one.
+        at + 1
+    } else {
+        return current;
+    };
+
+    counted(landed)
+}
+
 /// `len` as QML counts: a list longer than an `i32` counts is not one anybody scrolled to the end
 /// of, and saying it is the longest countable list is closer than saying it is empty.
 fn counted(len: usize) -> i32 {
@@ -1211,7 +1245,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{collision_refusal, stated_length, Book, BookState, TaffleAppRust};
+    use super::{collision_refusal, moved_index, stated_length, Book, BookState, TaffleAppRust};
     use crate::plan::{capture, Panel};
     use crate::worker::{BookFailure, Event};
 
@@ -1474,6 +1508,29 @@ mod tests {
         // A sum that is missing a file is not how long the book plays, and a row showing it would
         // be stating a length that is wrong.
         assert_eq!(stated_length(&[ten, None]), None);
+    }
+
+    #[test]
+    fn the_row_that_was_picked_stays_picked_wherever_a_move_puts_it() {
+        // Reordering the inputs is editing the book — the files play in the order they are listed
+        // — and what is picked is a place in that list. So Remove has to be aimed at the same file
+        // after a drag as before it, wherever the drag left it.
+
+        // The row that was dragged: it is picked, and it is where it was dropped.
+        assert_eq!(moved_index(2, 2, 0), 0);
+        assert_eq!(moved_index(0, 0, 3), 3);
+        // A row the dragged one was pulled out from under and put back above: everything between
+        // the two ends moves down by one.
+        assert_eq!(moved_index(0, 3, 0), 1);
+        assert_eq!(moved_index(2, 3, 0), 3);
+        // The same the other way: a row the dragged one was moved past downwards moves up by one.
+        assert_eq!(moved_index(3, 0, 3), 2);
+        assert_eq!(moved_index(1, 0, 2), 0);
+        // A row neither end of the move reaches stays exactly where it was, and a list with
+        // nothing picked has nothing to move.
+        assert_eq!(moved_index(4, 0, 2), 4);
+        assert_eq!(moved_index(0, 1, 3), 0);
+        assert_eq!(moved_index(-1, 0, 2), -1);
     }
 
     #[test]

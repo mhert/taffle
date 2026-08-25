@@ -221,7 +221,12 @@ ApplicationWindow {
                                     id: dropTarget
                                     anchors.fill: parent
                                     keys: ["taffle-file-row"]
-                                    onDropped: drop => window.app.moveFile(drop.source.visualIndex, row.visualIndex)
+                                    // The move takes the selection with it: the bridge answers
+                                    // with where the picked row ended up, so Remove stays aimed at
+                                    // the file it was aimed at before the drag.
+                                    onDropped: drop => {
+                                        fileList.currentIndex = window.app.moveFile(drop.source.visualIndex, row.visualIndex, fileList.currentIndex)
+                                    }
                                 }
                             }
                         }
