@@ -1,7 +1,7 @@
 # Maintainer: mhert <mathias@mh.cx>
 pkgbase=taffle
 pkgname=(taffle-cli taffle-gui)
-pkgver=1.0.0
+pkgver=2.0.0
 pkgrel=1
 pkgdesc="Convert audiobooks and music into Tonie Audio Format (TAF) files"
 arch=('x86_64')
