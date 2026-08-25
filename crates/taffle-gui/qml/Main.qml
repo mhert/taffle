@@ -291,6 +291,9 @@ ApplicationWindow {
             Button {
                 text: window.app.converting ? qsTr("Cancel") : qsTr("Convert")
                 highlighted: true
+                // A window holding no book at all has nothing to convert and nothing to stop, so
+                // there is nothing for this button to do; a batch that is running always has.
+                enabled: window.app.converting || window.app.bookCount > 0 || window.app.fileCount > 0
                 onClicked: {
                     // Whether a batch started is what this button and the rows under it then show;
                     // a refusal that has anything to say says it in the panel.

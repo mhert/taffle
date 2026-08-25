@@ -225,8 +225,13 @@ pub mod qobject {
         #[cxx_name = "bookCoverNote"]
         fn book_cover_note(self: &Self, index: i32) -> QString;
 
-        /// Converts every book that is waiting, the one being edited included; `false` where
-        /// there is nothing to convert or the set was refused, which `panelError` then says.
+        /// Converts every book that is waiting, the one being edited included; `false` where no
+        /// batch was started.
+        ///
+        /// A batch that is already running is left to run and nothing is said about it — the
+        /// chrome shows Cancel rather than Convert while one is on. Every other `false` is a
+        /// refusal `panelError` explains: nothing waiting to be converted, a book that is no
+        /// conversion, a set that would write over itself.
         #[qinvokable]
         fn convert(self: Pin<&mut Self>) -> bool;
 
@@ -566,6 +571,11 @@ impl qobject::TaffleApp {
 
         let batch = self.rust().waiting();
         if batch.is_empty() {
+            // A queue whose books have all run is a window where Convert is still there to press,
+            // and pressing it has to answer something: a batch of nothing started is a refusal
+            // like any other, not a button that does nothing at all.
+            self.as_mut()
+                .refuse("there is nothing to convert: no book in the queue is waiting");
             return false;
         }
         let (jobs, refused) = {
