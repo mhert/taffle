@@ -698,17 +698,22 @@ impl qobject::TaffleApp {
                 // The layer a conversion gives up at and what was said under it, joined the way
                 // the batch joins a chain. The input really is not there, so this is where a run
                 // of this job would give up; the words under it are made up, because asking the
-                // filesystem for the real ones is the reading the drill does not do.
-                result: Err(worker::BookFailure::Failed(format!(
-                    "cannot open input {}: the file is not there",
-                    drill_path(&failed, "m4b").display()
-                ))),
+                // filesystem for the real ones is the reading the drill does not do. A job that
+                // gives up there has not written a thing, so there is nothing removed to report.
+                result: Err(worker::BookFailure::Failed {
+                    chain: format!(
+                        "cannot open input {}: the file is not there",
+                        drill_path(&failed, "m4b").display()
+                    ),
+                    removed: false,
+                }),
             },
             // The last book is reported without ever starting, which is what a batch somebody
-            // stopped here would say about the one still waiting.
+            // stopped here would say about the one still waiting — and one that never started
+            // wrote nothing there was to take away again.
             worker::Event::Finished {
                 index: 2,
-                result: Err(worker::BookFailure::Cancelled),
+                result: Err(worker::BookFailure::Cancelled { removed: false }),
             },
             worker::Event::BatchDone,
         ] {
@@ -939,7 +944,9 @@ impl Book {
             }
             BookState::Done { result_line, .. } => result_line.clone(),
             BookState::Failed { message } => message.clone(),
-            BookState::Cancelled => removed_note("the conversion was stopped"),
+            BookState::Cancelled { removed } => {
+                removed_note("the conversion was stopped", *removed)
+            }
         }
     }
 
@@ -994,11 +1001,16 @@ enum BookState {
     },
     /// Did not convert.
     Failed {
-        /// The rendered failure chain, and the note that nothing half-written was left behind.
+        /// The rendered failure chain, and — where there was one — that the half-written file is
+        /// gone.
         message: String,
     },
     /// Stopped, before or during the conversion.
-    Cancelled,
+    Cancelled {
+        /// Whether there was a half-written file to remove: a book the batch never started wrote
+        /// nothing, and says nothing about a file.
+        removed: bool,
+    },
 }
 
 impl BookState {
@@ -1009,7 +1021,7 @@ impl BookState {
             Self::Converting { .. } => "converting",
             Self::Done { .. } => "done",
             Self::Failed { .. } => "failed",
-            Self::Cancelled => "cancelled",
+            Self::Cancelled { .. } => "cancelled",
         }
     }
 
@@ -1030,12 +1042,12 @@ fn finished(result: Result<taffle::JobOutcome, worker::BookFailure>) -> BookStat
             result_line: report_line(&outcome),
             cover_note: cover_note(&outcome),
         },
-        Err(worker::BookFailure::Failed(chain)) => BookState::Failed {
-            message: removed_note(&chain),
+        Err(worker::BookFailure::Failed { chain, removed }) => BookState::Failed {
+            message: removed_note(&chain, removed),
         },
         // Being stopped is the one failure somebody asked for, and the row says so rather than
         // rendering a chain nobody needs to read.
-        Err(worker::BookFailure::Cancelled) => BookState::Cancelled,
+        Err(worker::BookFailure::Cancelled { removed }) => BookState::Cancelled { removed },
     }
 }
 
@@ -1075,10 +1087,18 @@ fn cover_note(outcome: &taffle::JobOutcome) -> String {
     }
 }
 
-/// `reason`, and what goes with every book that did not make it: the batch removes the file a
-/// conversion had only half written, so a row that did not convert says nothing was left behind.
-fn removed_note(reason: &str) -> String {
-    format!("{reason}; the unfinished file was removed")
+/// `reason`, and — where `removed` says there was a file to take away — that it is gone: the batch
+/// removes the file a conversion had only half written, so a row that had one says nothing was
+/// left behind.
+///
+/// A conversion that gave up before writing anything says only why. The note is about a file, and
+/// a row claiming one was removed where none was ever written states something that did not happen.
+fn removed_note(reason: &str, removed: bool) -> String {
+    if removed {
+        format!("{reason}; the unfinished file was removed")
+    } else {
+        reason.to_owned()
+    }
 }
 
 /// The made-up book the smoke drill queues under `stem`: one input named after it, an output
@@ -1336,27 +1356,57 @@ mod tests {
         let mut app = app(vec![book(&["a.mp3"], None)], vec![0]);
         app.adopt(Event::Finished {
             index: 0,
-            result: Err(BookFailure::Failed(
-                "cannot open input a.mp3: no such file or directory".to_owned(),
-            )),
+            result: Err(BookFailure::Failed {
+                chain: "the encoder gave up half way".to_owned(),
+                removed: true,
+            }),
         });
         assert_eq!(row(&app, 0).state.name(), "failed");
         assert_eq!(
             row(&app, 0).result(),
-            "cannot open input a.mp3: no such file or directory; the unfinished file was removed"
+            "the encoder gave up half way; the unfinished file was removed"
+        );
+    }
+
+    #[test]
+    fn a_book_that_never_wrote_a_file_says_only_why() {
+        let mut app = app(vec![book(&["a.mp3"], None)], vec![0]);
+        app.adopt(Event::Finished {
+            index: 0,
+            result: Err(BookFailure::Failed {
+                chain: "cannot open input a.mp3: no such file or directory".to_owned(),
+                removed: false,
+            }),
+        });
+        // The commonest failure of all gives up before the output exists, and a row that said the
+        // unfinished file was removed would be stating something that did not happen.
+        assert_eq!(
+            row(&app, 0).result(),
+            "cannot open input a.mp3: no such file or directory"
         );
     }
 
     #[test]
     fn a_book_that_was_stopped_is_cancelled_rather_than_failed() {
-        let mut app = app(vec![book(&["a.mp3"], None)], vec![0]);
-        app.adopt(Event::Finished {
+        let mut stopped_early = app(vec![book(&["a.mp3"], None)], vec![0]);
+        stopped_early.adopt(Event::Finished {
             index: 0,
-            result: Err(BookFailure::Cancelled),
+            result: Err(BookFailure::Cancelled { removed: false }),
         });
-        assert_eq!(row(&app, 0).state.name(), "cancelled");
+        assert_eq!(row(&stopped_early, 0).state.name(), "cancelled");
+        // A book the batch never started wrote nothing, and says nothing about a file.
         assert_eq!(
-            row(&app, 0).result(),
+            row(&stopped_early, 0).result(),
+            "the conversion was stopped"
+        );
+
+        let mut stopped_writing = app(vec![book(&["a.mp3"], None)], vec![0]);
+        stopped_writing.adopt(Event::Finished {
+            index: 0,
+            result: Err(BookFailure::Cancelled { removed: true }),
+        });
+        assert_eq!(
+            row(&stopped_writing, 0).result(),
             "the conversion was stopped; the unfinished file was removed"
         );
     }

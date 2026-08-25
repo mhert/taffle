@@ -39,12 +39,24 @@ pub enum Event {
 }
 
 /// How a book did not make it, already classified for a row to show.
+///
+/// Both ways carry whether the file the conversion had begun was still there to take away, because
+/// a row that said so where nothing had been written would be reporting something that never
+/// happened — and the commonest failure of all, an input that cannot be opened, is exactly that.
 #[derive(Debug)]
 pub enum BookFailure {
     /// The run was cancelled before or during this book.
-    Cancelled,
-    /// The rendered failure chain, every layer on one line — the CLI's own rendering.
-    Failed(String),
+    Cancelled {
+        /// Whether a half-written file was found and removed.
+        removed: bool,
+    },
+    /// The conversion gave up.
+    Failed {
+        /// The rendered failure chain, every layer on one line — the CLI's own rendering.
+        chain: String,
+        /// Whether a half-written file was found and removed.
+        removed: bool,
+    },
 }
 
 /// How many books convert at once: a floor of 2 so a batch is parallel at all, a quarter of the
@@ -67,8 +79,9 @@ type Convert<'a> = &'a dyn Fn(
 /// events over one internal channel and the calling thread drains it through `deliver` — so
 /// delivery is single-threaded and in arrival order, and `deliver` needs no thread-safety of its
 /// own. A raised `cancel` stops running jobs between chunks and keeps waiting ones from starting;
-/// the partial file of a failed or cancelled job is removed best-effort before it is reported.
-/// Returns once every job is reported and [`Event::BatchDone`] was delivered.
+/// the partial file of a failed or cancelled job is removed best-effort before it is reported, and
+/// what it says of itself states whether there was one to remove. Returns once every job is
+/// reported and [`Event::BatchDone`] was delivered.
 pub fn run_batch<C, D>(
     jobs: &[taffle::ConvertJob],
     cap: usize,
@@ -134,7 +147,8 @@ fn convert_one(
     if cancel.load(Ordering::SeqCst) {
         let _ = events.send(Event::Finished {
             index,
-            result: Err(BookFailure::Cancelled),
+            // Nothing was begun here, so there is nothing half-written to have been taken away.
+            result: Err(BookFailure::Cancelled { removed: false }),
         });
         return;
     }
@@ -165,29 +179,37 @@ fn convert_one(
     let result = outcome.map_err(|error| {
         // A conversion that failed part-way leaves the file it was writing behind, a cancelled one
         // included, and half a book is no book. Removing it is best-effort on purpose: what is
-        // reported is how the conversion went, not how the tidying after it went.
-        if let Some(output) = &job.output {
-            let _ = std::fs::remove_file(output);
-        }
+        // reported is how the conversion went, not how the tidying after it went. Whether there
+        // was a file at all is carried out with the failure, because that is what a row needs to
+        // say what became of it — and a conversion that gave up before writing anything left
+        // nothing to say.
+        let removed = job
+            .output
+            .as_ref()
+            .is_some_and(|output| std::fs::remove_file(output).is_ok());
 
-        classify(&error)
+        classify(&error, removed)
     });
     let _ = events.send(Event::Finished { index, result });
 }
 
-/// What a row shows for a job that did not make it.
+/// What a row shows for a job that did not make it, where `removed` says whether the file it had
+/// begun was still there to take away.
 ///
 /// Being stopped is not a book that failed — it is the one failure a person asked for — so it is
 /// told apart here rather than rendered as a chain nobody needs to read.
-fn classify(error: &taffle::JobError) -> BookFailure {
+fn classify(error: &taffle::JobError, removed: bool) -> BookFailure {
     if matches!(
         error,
         taffle::JobError::Convert(taffle::ConvertError::Cancelled)
     ) {
-        return BookFailure::Cancelled;
+        return BookFailure::Cancelled { removed };
     }
 
-    BookFailure::Failed(chain(error))
+    BookFailure::Failed {
+        chain: chain(error),
+        removed,
+    }
 }
 
 /// Every layer of `error` on one line, joined by `": "`.
@@ -407,7 +429,9 @@ mod tests {
             .filter_map(|event| match event {
                 Event::Finished {
                     index,
-                    result: Err(BookFailure::Cancelled),
+                    // Neither job got as far as writing anything: the first gave up between
+                    // chunks, the second never started.
+                    result: Err(BookFailure::Cancelled { removed: false }),
                 } => Some(index),
                 _ => None,
             })
@@ -436,9 +460,43 @@ mod tests {
         assert!(!output.exists(), "the unfinished file must not stay behind");
         let failed = rx.try_iter().any(|event| {
             matches!(event,
-                Event::Finished { result: Err(BookFailure::Failed(message)), .. }
-                    if message.contains("boom"))
+                Event::Finished { result: Err(BookFailure::Failed { chain, removed }), .. }
+                    if chain.contains("boom") && removed)
         });
-        assert!(failed, "the rendered chain must reach the row");
+        assert!(
+            failed,
+            "the rendered chain and the file that was taken away must reach the row"
+        );
+    }
+
+    #[test]
+    fn a_job_that_wrote_nothing_says_nothing_was_removed() {
+        // The commonest failure of all — an input that cannot be opened — gives up before the
+        // output exists, and a row that said the unfinished file was removed would be stating
+        // something that did not happen.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let output = dir.path().join("book.taf");
+        let (tx, rx) = mpsc::channel();
+        run_batch(
+            &[job("a.mp3", output.to_str().expect("utf-8 temp path"))],
+            1,
+            &AtomicBool::new(false),
+            |_job, _progress| {
+                Err(taffle::JobError::Convert(taffle::ConvertError::Io(
+                    std::io::Error::other("cannot open input a.mp3"),
+                )))
+            },
+            |event| tx.send(event).unwrap(),
+        );
+        let removed_nothing = rx.try_iter().any(|event| {
+            matches!(
+                event,
+                Event::Finished {
+                    result: Err(BookFailure::Failed { removed: false, .. }),
+                    ..
+                }
+            )
+        });
+        assert!(removed_nothing, "no file was written, so none was removed");
     }
 }
