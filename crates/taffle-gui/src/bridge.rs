@@ -179,6 +179,9 @@ pub mod qobject {
         fn add_to_batch(self: Pin<&mut Self>) -> bool;
 
         /// Moves the queued book at `index` back into the editing area, exactly as it was typed.
+        ///
+        /// A book already being edited is queued first, the way Add would queue it; where that is
+        /// refused nothing moves at all and `panelError` says why.
         #[qinvokable]
         #[cxx_name = "reopenRow"]
         fn reopen_row(self: Pin<&mut Self>, index: i32);
@@ -473,6 +476,17 @@ impl qobject::TaffleApp {
             self.rust().books.get(at).map(|book| &book.state),
             Some(BookState::Ready)
         ) {
+            return;
+        }
+
+        // The book already in the editing area is not thrown away to make room for the one coming
+        // back: it is queued exactly as pressing Add would queue it, which is the same capture
+        // Convert makes of it. A book that cannot be queued — a typed time that is no time, an
+        // output another book already writes — keeps the editing area and the panel says why,
+        // because a click that silently destroyed what somebody had typed would be the one
+        // mistake here with no way back. Adding puts it at the end of the queue, so the row being
+        // reopened is still the row that was clicked.
+        if !self.rust().panel.files.is_empty() && !self.as_mut().add_to_batch() {
             return;
         }
 
