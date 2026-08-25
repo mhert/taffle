@@ -412,9 +412,14 @@ jobs:
         # on the run. The Qt Quick Controls style is left at whatever the platform picks, where
         # that test pins it to Basic: which style macOS resolves to is part of what macdeployqt
         # had to bundle, and pinning Basic would pass with it missing.
+        #
+        # Qt writes its messages to stderr only where it decides stderr is where they belong, and
+        # hands them to the platform's own log otherwise. Forcing them here is what puts the
+        # reason for a failed load in this job's own output — on a lane whose bundle nobody can
+        # assemble locally, a bare exit code is the whole diagnosis without it.
         run: |
           mv "$HOME/Qt" "$HOME/Qt-build-only"
-          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_FORCE_STDERR_LOGGING=1 \
             stage-gui/Taffle.app/Contents/MacOS/taffle-gui --smoke
       - name: Tar
         env:
@@ -621,6 +626,11 @@ jobs:
           # windeployqt had to bundle, and pinning Basic would pass with it missing.
           $env:QT_QPA_PLATFORM = "offscreen"
           $env:QT_QUICK_BACKEND = "software"
+          # Qt writes its messages to stderr only where it decides stderr is where they belong,
+          # and hands them to the platform's own log otherwise. Forcing them here is what puts the
+          # reason for a failed load in this job's own output — on a lane whose install nobody can
+          # reproduce locally, a bare exit code is the whole diagnosis without it.
+          $env:QT_FORCE_STDERR_LOGGING = "1"
           & "$env:ProgramFiles\taffle-gui\taffle-gui.exe" --smoke
           if ($LASTEXITCODE -ne 0) { throw "the installed window failed its own self-test (exit $LASTEXITCODE)" }
       - name: Upload
