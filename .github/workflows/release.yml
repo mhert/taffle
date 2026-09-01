@@ -645,11 +645,24 @@ jobs:
         # learns from their import lines which QtQuick modules and style plugins to bundle.
         # --no-translations because nothing here is translated: Qt's catalogs would be
         # megabytes of nothing.
+        #
+        # --release states outright what windeployqt cannot read off this binary. Its
+        # debug-or-release call is made from the CRT a PE imports, and a crt-static Rust build
+        # imports no CRT DLL at all, so the reading falls back to whether the PE carries a debug
+        # directory — which rustc writes into release binaries too, for the PDB — and the whole
+        # staged tree comes up Qt's debug DLLs, reaching for a debug runtime no redistributable
+        # ships.
+        #
+        # --include-plugins qoffscreen: windeployqt ships only the platform Windows itself
+        # loads. The installed window's smoke below runs offscreen, so that platform has to
+        # ride along too or the self-test would have no platform to boot at all — the same
+        # trade the AppImage lane makes.
         run: |
           mkdir -p stage-gui
           cp target/release/taffle-gui.exe stage-gui/taffle-gui.exe
           cp LICENSE README.md stage-gui/
-          windeployqt --qmldir crates/taffle-gui/qml --no-translations stage-gui/taffle-gui.exe
+          windeployqt --release --include-plugins qoffscreen \
+            --qmldir crates/taffle-gui/qml --no-translations stage-gui/taffle-gui.exe
       - name: Put the MSVC runtime beside the window
         shell: bash
         # crt-static folds that runtime into the command-line binary; it cannot do the same here,
