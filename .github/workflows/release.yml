@@ -511,13 +511,6 @@ jobs:
         # the chrome's modules are compiled into the executable as resources, so -qmldir points
         # it at the same QML sources the build compiled and it learns from their import lines
         # which QtQuick modules and style plugins to bundle.
-        #
-        # macdeployqt bundles only the platform macOS itself loads, cocoa. The smoke below runs
-        # offscreen with the build's Qt moved away, so that platform has to ride along too or
-        # the self-test would have no platform to boot at all — the same trade the AppImage lane
-        # makes. It is copied in before macdeployqt runs and named to it with -executable, so
-        # its Qt references are rewritten to the bundle's frameworks like those of every plugin
-        # macdeployqt copies itself.
         run: |
           app="stage-gui/Taffle.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -526,11 +519,7 @@ jobs:
           cp target/release/taffle-gui "$app/Contents/MacOS/taffle-gui"
           cp packaging/linux/taffle.icns "$app/Contents/Resources/taffle.icns"
           cp LICENSE README.md stage-gui/
-          mkdir -p "$app/Contents/PlugIns/platforms"
-          cp "$("$QMAKE" -query QT_INSTALL_PLUGINS)/platforms/libqoffscreen.dylib" \
-            "$app/Contents/PlugIns/platforms/"
-          macdeployqt "$app" -qmldir=crates/taffle-gui/qml \
-            -executable="$app/Contents/PlugIns/platforms/libqoffscreen.dylib"
+          macdeployqt "$app" -qmldir=crates/taffle-gui/qml
       - name: Put the bundle through the window's own smoke, with Qt's own build gone
         # The window is proven the only way a bundled Qt tree can be: started. The self-test
         # boots the whole chrome, drives a fake batch through it and exits, so a framework or a
@@ -542,10 +531,14 @@ jobs:
         # to find it would let a framework or an import the bundle never got be resolved from
         # there instead, and the run would pass on a machine no user has.
         #
-        # No display server and a software scene graph, the pair the crate's own smoke test puts
-        # on the run. The Qt Quick Controls style is left at whatever the platform picks, where
-        # that test pins it to Basic: which style macOS resolves to is part of what macdeployqt
-        # had to bundle, and pinning Basic would pass with it missing.
+        # Cocoa rather than the offscreen every other smoke runs. A macOS runner carries a real
+        # window session where the Linux lanes' containers have none, and cocoa is the platform
+        # every user of this bundle loads: it is part of what macdeployqt had to bundle, and an
+        # offscreen run would pass with it missing. It is also the platform the style needs. The
+        # Qt Quick Controls style is left at whatever the platform picks, where the crate's own
+        # smoke test pins Basic — which style macOS resolves to is part of what had to be
+        # bundled — and the native style it resolves paints through AppKit, which wants the real
+        # platform underneath. The scene graph stays software, so nothing here asks for a GPU.
         #
         # Qt writes its messages to stderr only where it decides stderr is where they belong, and
         # hands them to the platform's own log otherwise. Forcing them here is what puts the
@@ -553,7 +546,7 @@ jobs:
         # assemble locally, a bare exit code is the whole diagnosis without it.
         run: |
           mv "$HOME/Qt" "$HOME/Qt-build-only"
-          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_FORCE_STDERR_LOGGING=1 \
+          QT_QUICK_BACKEND=software QT_FORCE_STDERR_LOGGING=1 \
             stage-gui/Taffle.app/Contents/MacOS/taffle-gui --smoke
       - name: Tar
         env:
