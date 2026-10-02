@@ -11,7 +11,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::time::Duration;
 
 use symphonia::core::io::MediaSource;
-use taf_encode::{probe_duration, ProbeError};
+use taf_encode::{probe_duration, probe_marks, ProbeError};
 
 /// How long [`fixtures::TINY_M4B`] states it plays, to the nanosecond.
 ///
@@ -163,4 +163,28 @@ impl MediaSource for SeeklessSource {
     fn byte_len(&self) -> Option<u64> {
         Some(self.0.get_ref().len() as u64)
     }
+}
+
+#[test]
+fn a_book_states_where_its_chapters_begin_in_the_frames_a_conversion_counts_in() {
+    let marks = probe_marks(Box::new(Cursor::new(fixtures::TINY_M4B.to_vec())))
+        .expect("the m4b states its marks");
+
+    // Authored at 44 100 Hz five seconds apart, which is 240 000 frames at 48 kHz.
+    assert_eq!(marks, [0, 240_000]);
+}
+
+#[test]
+fn an_input_that_carries_no_marks_states_none() {
+    let marks = probe_marks(Box::new(Cursor::new(fixtures::sine_wav()))).expect("the wav is read");
+
+    assert!(marks.is_empty());
+}
+
+#[test]
+fn bytes_that_are_no_recording_state_no_marks_either() {
+    let refusal = probe_marks(Box::new(Cursor::new(b"not a recording at all".to_vec())))
+        .expect_err("nothing to read marks off");
+
+    assert!(matches!(refusal, ProbeError::Unrecognized), "{refusal:?}");
 }

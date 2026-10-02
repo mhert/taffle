@@ -11,8 +11,10 @@ use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptio
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::decode::open_source;
 use crate::decode::opus_input::sniff;
 use crate::decode::symphonia::audio_track;
+use crate::pcm::Pcm48;
 
 /// Why no duration could be stated.
 #[derive(Debug, thiserror::Error)]
@@ -103,4 +105,30 @@ fn book_track(tracks: &[Track], opus: bool) -> Option<&Track> {
     }
 
     audio_track(tracks)
+}
+
+/// Where the chapter marks the input carries begin, in frames at 48 kHz and in the order it
+/// states them — without decoding any of it.
+///
+/// The input is opened the way a conversion opens it and the marks are scaled the way a
+/// conversion scales them, so a mark stated here is the mark a conversion goes on to place.
+///
+/// # Errors
+///
+/// [`ProbeError::Unrecognized`] for an input a conversion could not open either: bytes that are
+/// no format this build reads, or audio in a shape nothing here brings to 48 kHz stereo.
+pub fn probe_marks(source: Box<dyn MediaSource>) -> Result<Vec<u64>, ProbeError> {
+    let mut source = open_source(source).map_err(unrecognized)?;
+    let marks = source.metadata().chapters;
+    let pcm = Pcm48::new(source).map_err(unrecognized)?;
+
+    Ok(marks
+        .into_iter()
+        .map(|mark| pcm.scale_samples(mark.start_sample))
+        .collect())
+}
+
+/// Whatever kept an input from being opened, as what a probe says about it.
+fn unrecognized<E>(_: E) -> ProbeError {
+    ProbeError::Unrecognized
 }

@@ -12,6 +12,10 @@
 //! [`probe_duration()`] is beside all of that rather than a part of it: how long an input states it
 //! plays, read off its headers, for a caller that wants a length before it wants a conversion.
 //!
+//! [`plan_pieces()`] settles in front of a conversion which chapter each of its pieces begins at,
+//! from the lengths and chapter marks the inputs state about themselves; [`probe_marks()`] reads
+//! those marks off an input's headers.
+//!
 //! # The shape a conversion runs in
 //!
 //! The inputs are read once, in the order they were handed in, by one reader — nothing here rewinds
@@ -43,6 +47,7 @@ pub mod convert;
 pub mod decode;
 mod encode;
 pub mod pcm;
+pub mod pieces;
 mod probe;
 mod produce;
 
@@ -59,4 +64,5 @@ pub use decode::{
     open_source, AudioSource, Cover, DecodeError, SourceChapter, SourceMetadata, SourceSpec,
 };
 pub use pcm::{Pcm48, PcmError, SilenceOpts, SilenceProcessor, SILENCE_THRESHOLD};
-pub use probe::{probe_duration, ProbeError};
+pub use pieces::{plan_pieces, Layout, PieceError, PiecePlan, PlannedPiece};
+pub use probe::{probe_duration, probe_marks, ProbeError};
