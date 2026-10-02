@@ -95,6 +95,7 @@ fn job(args: ConvertArgs) -> ConvertJob {
                 add_pause_leading: add_pause_leading.to_samples_48k(),
                 add_pause_each_chapter: add_pause_each_chapter.to_samples_48k(),
             },
+            skip_trailing: 0,
             // Nothing on the command line states how many encoders to run, so a conversion takes
             // the machine as it finds it.
             workers: None,
