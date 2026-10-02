@@ -210,8 +210,9 @@ m4b's own marks, one per file where several are given, or the `--chapters` list 
 book with fewer of them than pieces is refused before anything is written.
 
 `--skip-trailing` drops seconds off the very end, the way `--skip-leading` drops them off
-the start. What is done to the start of a book is done to the first piece and what is done
-to its end is done to the last; the per-chapter options reach every chapter of every piece.
+the start. What is done to the start of a book is done to the first piece. The seconds
+`--skip-trailing` drops come off the last piece, and the cuts are planned over what is left,
+so they can move earlier cuts; the per-chapter options reach every chapter of every piece.
 
 ### Reading a TAF back
 

@@ -80,6 +80,20 @@ fn frames_48k(length: Duration) -> u64 {
     whole.saturating_add(u64::from(length.subsec_nanos()) * rate / 1_000_000_000)
 }
 
+/// The warning for a book written as fewer files than it was planned as, or `None` where every
+/// piece planned was written.
+///
+/// A cut is made where its chapter begins, and a chapter with no audio left begins nowhere, so
+/// the pieces written can fall short of the pieces planned.
+#[must_use]
+pub fn fewer_pieces(written: usize, planned: usize) -> Option<String> {
+    (written < planned).then(|| {
+        format!(
+            "only {written} of the {planned} pieces planned were written: a chapter that was to begin one never began"
+        )
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
@@ -87,7 +101,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::{frames_48k, plan_pieces, probe_layout, PlanError};
+    use super::{fewer_pieces, frames_48k, plan_pieces, probe_layout, PlanError};
     use crate::{Conversion, ConvertJob, Layout, ProbeError};
 
     /// The fixture `name`, where `taf-encode` keeps the committed ones.
@@ -191,5 +205,15 @@ mod tests {
             refusal.to_string(),
             "2 pieces asked for, but the book has 1 chapter"
         );
+    }
+
+    #[test]
+    fn fewer_pieces_written_than_planned_are_warned_of_and_as_many_are_not() {
+        assert_eq!(
+            fewer_pieces(2, 3).as_deref(),
+            Some("only 2 of the 3 pieces planned were written: a chapter that was to begin one never began")
+        );
+        assert_eq!(fewer_pieces(0, 1).as_deref(), Some("only 0 of the 1 pieces planned were written: a chapter that was to begin one never began"));
+        assert_eq!(fewer_pieces(3, 3), None);
     }
 }

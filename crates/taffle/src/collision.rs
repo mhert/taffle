@@ -34,10 +34,11 @@ pub enum CollisionError {
 ///
 /// Outputs are resolved the way the jobs will resolve them: as stated, or as
 /// [`default_output_path`](crate::default_output_path) of the first input, and a job cut into
-/// pieces is held to every one of their names — the name they are derived from is none of them. A job of no inputs resolves to no output here —
-/// having nothing to convert is the engine's refusal, not a collision. Paths are compared as
-/// they were typed, exactly as the single-job check always did: two names for one file are two
-/// names here, and the conversion runs.
+/// pieces is held to every one of their names — the name they are derived from is none of
+/// them. A job of no inputs resolves to no output here — having nothing to convert is the
+/// engine's refusal, not a collision. Paths are compared as they were typed, exactly as the
+/// single-job check always did: two names for one file are two names here, and the conversion
+/// runs.
 ///
 /// # Errors
 ///

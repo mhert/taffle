@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::Result;
 use taffle::duration::{clock, RATE};
 use taffle::{
-    default_output_path, output_paths, plan_pieces, planned_chapters, probe_layout,
+    default_output_path, fewer_pieces, output_paths, plan_pieces, planned_chapters, probe_layout,
     refuse_collisions, run_convert, ChapterError, ChapterMode, Conversion, ConvertError,
     ConvertJob, JobError, JobOutcome, Layout, PiecePlan, Progress, SilenceOpts, MAX_CHAPTERS,
 };
@@ -84,11 +84,8 @@ pub fn run(args: ConvertArgs) -> Result<()> {
         report(outcome);
     }
     // A cut is made where its chapter begins, and a chapter with no audio left begins nowhere.
-    if outcomes.len() < wanted {
-        eprintln!(
-            "warning: only {} of the {wanted} pieces planned were written: a chapter that was to begin one never began",
-            outcomes.len()
-        );
+    if let Some(warning) = fewer_pieces(outcomes.len(), wanted) {
+        eprintln!("warning: {warning}");
     }
 
     Ok(())

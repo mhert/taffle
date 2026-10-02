@@ -69,7 +69,7 @@ use taf_encode::{convert_pieces, Input};
 pub use collision::{refuse_collisions, CollisionError};
 pub use inspect::{inspect, read_through, ChapterRead, InspectError, Inspection};
 pub use output::{default_output_path, output_paths, piece_path};
-pub use pieces::{plan_pieces, probe_layout, PlanError};
+pub use pieces::{fewer_pieces, plan_pieces, probe_layout, PlanError};
 
 // What the workflows above hand back and take in, from the crates the types are defined in: a
 // frontend names them through here rather than depending on `taf` and `taf-encode` itself.

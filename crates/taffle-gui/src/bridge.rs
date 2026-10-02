@@ -1106,13 +1106,13 @@ enum BookState {
     },
     /// Did not convert.
     Failed {
-        /// The rendered failure chain, and — where there was one — that the half-written file is
-        /// gone.
+        /// The rendered failure chain, and — where there was one — that the files it had begun
+        /// are gone.
         message: String,
     },
     /// Stopped, before or during the conversion.
     Cancelled {
-        /// Whether there was a half-written file to remove: a book the batch never started wrote
+        /// Whether there were begun files to remove: a book the batch never started wrote
         /// nothing, and says nothing about a file.
         removed: bool,
     },
@@ -1203,12 +1203,7 @@ fn note(outcomes: &[taffle::JobOutcome], planned: usize) -> String {
         .map(|why| format!("no cover was written: {why}"))
         .collect();
     // A cut is made where its chapter begins, and a chapter with no audio left begins nowhere.
-    if outcomes.len() < planned {
-        lines.push(format!(
-            "only {} of the {planned} pieces planned were written: a chapter that was to begin one never began",
-            outcomes.len()
-        ));
-    }
+    lines.extend(taffle::fewer_pieces(outcomes.len(), planned));
 
     lines.join("\n")
 }

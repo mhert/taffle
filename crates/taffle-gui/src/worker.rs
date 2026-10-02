@@ -47,14 +47,14 @@ pub enum Event {
 pub enum BookFailure {
     /// The run was cancelled before or during this book.
     Cancelled {
-        /// Whether a half-written file was found and removed, of a book in pieces any one of them.
+        /// Whether any file the book had begun was found and removed.
         removed: bool,
     },
     /// The conversion gave up.
     Failed {
         /// The rendered failure chain, every layer on one line — the CLI's own rendering.
         chain: String,
-        /// Whether a half-written file was found and removed, of a book in pieces any one of them.
+        /// Whether any file the book had begun was found and removed.
         removed: bool,
     },
 }
@@ -147,7 +147,7 @@ fn convert_one(
     if cancel.load(Ordering::SeqCst) {
         let _ = events.send(Event::Finished {
             index,
-            // Nothing was begun here, so there is nothing half-written to have been taken away.
+            // Nothing was begun here, so there is no begun file to have been taken away.
             result: Err(BookFailure::Cancelled { removed: false }),
         });
         return;
