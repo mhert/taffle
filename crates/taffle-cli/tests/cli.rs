@@ -28,7 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use predicates::prelude::PredicateBooleanExt;
+use predicates::prelude::{predicate, PredicateBooleanExt};
 use predicates::str::{contains, starts_with};
 use taf::header::{HeaderView, BLOCK_LEN};
 use taf::reader::Validator;
@@ -300,7 +300,14 @@ fn a_chapter_list_longer_than_a_box_plays_is_a_warning_and_the_file_is_still_wri
         .args(["--chapters", &offsets(0, MAX_CHAPTERS + 1)])
         .assert()
         .success()
-        .stderr(starts_with(over_limit(MAX_CHAPTERS + 1)));
+        .stderr(
+            starts_with(over_limit(MAX_CHAPTERS + 1))
+                // Said once, from the list: the chapters the file came to are the ones that were
+                // already counted, and counting them again would be the same warning twice.
+                .and(predicate::function(|said: &str| {
+                    said.matches(&over_limit(MAX_CHAPTERS + 1)).count() == 1
+                })),
+        );
 
     assert_eq!(chapters_of(&taf), MAX_CHAPTERS + 1);
 }
@@ -744,7 +751,9 @@ fn a_run_cut_into_pieces_says_them_first_and_writes_one_file_each() {
         // The plan, before anything is converted: the names, the lengths the headers state and
         // the chapters each piece holds.
         .stderr(
-            contains("2 pieces:")
+            contains("warning: only")
+                .not()
+                .and(contains("2 pieces:"))
                 .and(contains(format!(
                     "  {}  ~0:02  (chapter 1)",
                     first.display()
@@ -850,7 +859,11 @@ fn one_piece_is_the_file_a_run_always_wrote() {
         .args(["--pieces", "1"])
         .assert()
         .success()
-        .stderr(contains("pieces:").not());
+        .stderr(
+            contains("pieces:")
+                .not()
+                .and(contains("warning: only").not()),
+        );
 
     assert_eq!(listing(dir.path()), ["book.taf", "book.wav"]);
 }
