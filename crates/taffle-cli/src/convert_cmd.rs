@@ -5,17 +5,18 @@
 //!
 //! The files that were written go to stdout, one per line, so a run can be read by whatever called
 //! it. Everything else — the line a running conversion writes over, a chapter list longer than a
-//! box plays, a cover that could not be written — goes to stderr, because none of it is the answer
-//! to what was asked.
+//! box plays, the plan of a run cut into pieces, a cover that could not be written — goes to
+//! stderr, because none of it is the answer to what was asked.
 
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use anyhow::Result;
 use taffle::duration::{clock, RATE};
 use taffle::{
-    default_output_path, planned_chapters, refuse_collisions, run_convert, ChapterError,
-    ChapterMode, Conversion, ConvertError, ConvertJob, JobError, JobOutcome, Progress, SilenceOpts,
-    MAX_CHAPTERS,
+    default_output_path, output_paths, plan_pieces, planned_chapters, probe_layout,
+    refuse_collisions, run_convert, ChapterError, ChapterMode, Conversion, ConvertError,
+    ConvertJob, JobError, JobOutcome, Layout, PiecePlan, Progress, SilenceOpts, MAX_CHAPTERS,
 };
 
 use crate::cli::ConvertArgs;
@@ -27,7 +28,17 @@ use crate::cli::ConvertArgs;
 /// If the output is one of the inputs, or if the conversion itself failed — an input that could not
 /// be read, a file that could not be written, a chapter list that is no plan.
 pub fn run(args: ConvertArgs) -> Result<()> {
-    let job = job(args);
+    let pieces = args.pieces;
+    let mut job = job(args);
+
+    // Pieces are settled in front of the audio, from what the files state about themselves —
+    // which is also the moment to say how long each of them will be.
+    let plan = if pieces.get() > 1 {
+        Some(planned(&mut job, pieces)?)
+    } else {
+        None
+    };
+    let wanted = job.piece_starts.len() + 1;
 
     // A command line states one conversion, and it is held against itself while there is still
     // nothing on the disk to undo.
@@ -35,26 +46,36 @@ pub fn run(args: ConvertArgs) -> Result<()> {
 
     // The chapter count is said once, where it first stands: a plan somebody typed is settled in
     // front of the audio, so saying it there is a chance to stop the run rather than something
-    // found out an hour of encoding later.
-    let planned = planned_chapters(&job.options.chapter_mode);
-    if let Some(chapters) = planned {
-        warn_over_limit(chapters);
+    // found out an hour of encoding later. A box counts the chapters of a file, so where the
+    // book is cut into pieces it is each piece that is counted.
+    let stated = planned_chapters(&job.options.chapter_mode);
+    match &plan {
+        Some(plan) => {
+            for piece in &plan.pieces {
+                warn_over_limit(piece.chapters);
+            }
+        }
+        None => {
+            if let Some(chapters) = stated {
+                warn_over_limit(chapters);
+            }
+        }
     }
 
     let mut line = ProgressLine::default();
-    let outcome = run_convert(job, &mut |event| {
+    let outcomes = run_convert(job, &mut |event| {
         line.show(event);
 
         std::ops::ControlFlow::Continue(())
     });
-    // Whatever is said next — the file that was written, or why it was not — begins on a line of
-    // its own.
+    // Whatever is said next — the files that were written, or why they were not — begins on a
+    // line of its own.
     line.finish();
-    let outcomes = outcome.map_err(in_clock_time)?;
+    let outcomes = outcomes.map_err(in_clock_time)?;
 
     // A plan nobody typed is settled by the conversion, and this is where it stands: the chapters
     // the file holds.
-    if planned.is_none() {
+    if plan.is_none() && stated.is_none() {
         for outcome in &outcomes {
             warn_over_limit(outcome.report.chapters.len());
         }
@@ -62,8 +83,51 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     for outcome in &outcomes {
         report(outcome);
     }
+    // A cut is made where its chapter begins, and a chapter with no audio left begins nowhere.
+    if outcomes.len() < wanted {
+        eprintln!(
+            "warning: only {} of the {wanted} pieces planned were written: a chapter that was to begin one never began",
+            outcomes.len()
+        );
+    }
 
     Ok(())
+}
+
+/// Plans the pieces `job` is cut into, puts the cuts into the job, and says what they are.
+fn planned(job: &mut ConvertJob, pieces: NonZeroUsize) -> Result<PiecePlan> {
+    let layouts: Vec<Option<Layout>> = job
+        .inputs
+        .iter()
+        .map(|input| probe_layout(input).ok())
+        .collect();
+    let plan = plan_pieces(job, &layouts, pieces)?;
+    job.piece_starts = plan.starts();
+    announce(job, &plan);
+
+    Ok(plan)
+}
+
+/// Says what the pieces of `job` are: the file each of them goes to, how long the headers say it
+/// plays, and the chapters of the book it holds.
+fn announce(job: &ConvertJob, plan: &PiecePlan) {
+    eprintln!("{} pieces:", plan.pieces.len());
+
+    let mut first = 1;
+    for (path, piece) in output_paths(job).iter().zip(&plan.pieces) {
+        let last = first + piece.chapters - 1;
+        let chapters = if piece.chapters == 1 {
+            format!("chapter {first}")
+        } else {
+            format!("chapters {first}-{last}")
+        };
+        eprintln!(
+            "  {}  ~{}  ({chapters})",
+            path.display(),
+            at_clock(piece.frames)
+        );
+        first = last + 1;
+    }
 }
 
 /// The job `args` states, with the output resolved.
@@ -72,11 +136,13 @@ fn job(args: ConvertArgs) -> ConvertJob {
         inputs,
         output,
         skip_leading,
+        skip_trailing,
         trim_pause_leading,
         trim_pause_each_chapter,
         add_pause_leading,
         add_pause_each_chapter,
         chapters,
+        pieces: _,
         no_cover,
     } = args;
 
@@ -99,7 +165,7 @@ fn job(args: ConvertArgs) -> ConvertJob {
                 add_pause_leading: add_pause_leading.to_samples_48k(),
                 add_pause_each_chapter: add_pause_each_chapter.to_samples_48k(),
             },
-            skip_trailing: 0,
+            skip_trailing: skip_trailing.to_samples_48k(),
             // Nothing on the command line states how many encoders to run, so a conversion takes
             // the machine as it finds it.
             workers: None,
