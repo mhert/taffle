@@ -32,7 +32,7 @@ pub enum Event {
         /// Which job, counted from the first one in the batch.
         index: usize,
         /// What it came to.
-        result: Result<taffle::JobOutcome, BookFailure>,
+        result: Result<Vec<taffle::JobOutcome>, BookFailure>,
     },
     /// Every job of the batch has been reported.
     BatchDone,
@@ -73,7 +73,7 @@ pub fn concurrency_cap() -> usize {
 type Convert<'a> = &'a dyn Fn(
     taffle::ConvertJob,
     &mut dyn FnMut(taffle::Progress) -> ControlFlow<()>,
-) -> Result<taffle::JobOutcome, taffle::JobError>;
+) -> Result<Vec<taffle::JobOutcome>, taffle::JobError>;
 
 /// Runs every job, at most `cap` at once and never fewer than one at a time. Workers hand their
 /// events over one internal channel and the calling thread drains it through `deliver` — so
@@ -92,7 +92,7 @@ pub fn run_batch<C, D>(
     C: Fn(
             taffle::ConvertJob,
             &mut dyn FnMut(taffle::Progress) -> ControlFlow<()>,
-        ) -> Result<taffle::JobOutcome, taffle::JobError>
+        ) -> Result<Vec<taffle::JobOutcome>, taffle::JobError>
         + Sync,
     D: FnMut(Event),
 {
@@ -244,6 +244,7 @@ mod tests {
             output: Some(output.into()),
             options: taffle::Conversion::default(),
             write_cover: false,
+            piece_starts: Vec::new(),
         }
     }
 
@@ -287,7 +288,7 @@ mod tests {
                 high.fetch_max(now, Ordering::SeqCst);
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 live.fetch_sub(1, Ordering::SeqCst);
-                Ok(ok_outcome(&job))
+                Ok(vec![ok_outcome(&job)])
             },
             |event| tx.send(event).unwrap(),
         );
@@ -337,7 +338,7 @@ mod tests {
             &AtomicBool::new(false),
             |job, _progress| {
                 converted.fetch_add(1, Ordering::SeqCst);
-                Ok(ok_outcome(&job))
+                Ok(vec![ok_outcome(&job)])
             },
             |event| tx.send(event).unwrap(),
         );
@@ -362,7 +363,7 @@ mod tests {
                 for samples_done in [100, 47_999, 48_000, 48_500, 96_000] {
                     let _ = progress(taffle::Progress::Encoded { samples_done });
                 }
-                Ok(ok_outcome(&job))
+                Ok(vec![ok_outcome(&job)])
             },
             |event| tx.send(event).unwrap(),
         );

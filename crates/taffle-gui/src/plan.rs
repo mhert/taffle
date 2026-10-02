@@ -147,6 +147,7 @@ pub fn capture(panel: &Panel) -> Result<BookPlan, CaptureError> {
             workers: None,
         },
         write_cover: panel.extract_cover,
+        piece_starts: Vec::new(),
     };
 
     Ok(BookPlan {

@@ -710,7 +710,7 @@ impl qobject::TaffleApp {
             },
             worker::Event::Finished {
                 index: 0,
-                result: Ok(taffle::JobOutcome {
+                result: Ok(vec![taffle::JobOutcome {
                     taf_path: drill_path(&converted, "taf"),
                     cover_path: None,
                     cover_error: None,
@@ -720,7 +720,7 @@ impl qobject::TaffleApp {
                         cover: None,
                         audio_id: taffle::AudioId::new(1),
                     },
-                }),
+                }]),
             },
             worker::Event::Started { index: 1 },
             worker::Event::Finished {
@@ -1066,11 +1066,11 @@ impl BookState {
 }
 
 /// What a job that is over leaves its row in.
-fn finished(result: Result<taffle::JobOutcome, worker::BookFailure>) -> BookState {
+fn finished(result: Result<Vec<taffle::JobOutcome>, worker::BookFailure>) -> BookState {
     match result {
-        Ok(outcome) => BookState::Done {
-            result_line: report_line(&outcome),
-            cover_note: cover_note(&outcome),
+        Ok(outcomes) => BookState::Done {
+            result_line: report_line(&outcomes),
+            cover_note: cover_note(&outcomes),
         },
         Err(worker::BookFailure::Failed { chain, removed }) => BookState::Failed {
             message: removed_note(&chain, removed),
@@ -1087,18 +1087,25 @@ fn finished(result: Result<taffle::JobOutcome, worker::BookFailure>) -> BookStat
 /// The cover is a file beside the file, so it is a line of its own the way the command line writes
 /// it. A cover that could *not* be written is no part of this: it is [`cover_note`], because it is
 /// a warning about a book that converted and this is what converting came to.
-fn report_line(outcome: &taffle::JobOutcome) -> String {
-    let chapters = outcome.report.chapters.len();
-    let plural = if chapters == 1 { "chapter" } else { "chapters" };
-    let mut lines = vec![format!(
-        "wrote {} ({}, {chapters} {plural})",
-        outcome.taf_path.display(),
-        clock(outcome.report.duration),
-    )];
+fn report_line(outcomes: &[taffle::JobOutcome]) -> String {
+    let lines: Vec<String> = outcomes
+        .iter()
+        .map(|outcome| {
+            let chapters = outcome.report.chapters.len();
+            let plural = if chapters == 1 { "chapter" } else { "chapters" };
+            let mut lines = vec![format!(
+                "wrote {} ({}, {chapters} {plural})",
+                outcome.taf_path.display(),
+                clock(outcome.report.duration),
+            )];
 
-    if let Some(cover) = &outcome.cover_path {
-        lines.push(format!("wrote {}", cover.display()));
-    }
+            if let Some(cover) = &outcome.cover_path {
+                lines.push(format!("wrote {}", cover.display()));
+            }
+
+            lines.join("\n")
+        })
+        .collect();
 
     lines.join("\n")
 }
@@ -1110,11 +1117,13 @@ fn report_line(outcome: &taffle::JobOutcome) -> String {
 /// the book converted, and what a row says about a conversion that went through is green. A cover
 /// is a file beside the book and never the book itself, so a cover nothing could be made of is a
 /// note and never a failure.
-fn cover_note(outcome: &taffle::JobOutcome) -> String {
-    match &outcome.cover_error {
-        Some(why) => format!("no cover was written: {why}"),
-        None => String::new(),
-    }
+fn cover_note(outcomes: &[taffle::JobOutcome]) -> String {
+    outcomes
+        .iter()
+        .filter_map(|outcome| outcome.cover_error.as_ref())
+        .map(|why| format!("no cover was written: {why}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `reason`, and — where `removed` says there was a file to take away — that it is gone: the batch
@@ -1157,6 +1166,7 @@ fn drill_book(stem: &str) -> Book {
                 output: Some(drill_path(stem, "taf")),
                 options: taffle::Conversion::default(),
                 write_cover: panel.extract_cover,
+                piece_starts: Vec::new(),
             },
             panel,
         },
@@ -1358,7 +1368,7 @@ mod tests {
         let mut app = app(vec![book(&["a.mp3"], None)], vec![0]);
         app.adopt(Event::Finished {
             index: 0,
-            result: Ok(outcome(16, Duration::from_secs(3852))),
+            result: Ok(vec![outcome(16, Duration::from_secs(3852))]),
         });
         assert_eq!(row(&app, 0).state.name(), "done");
         assert_eq!(
@@ -1374,7 +1384,7 @@ mod tests {
         let mut with_cover = app(vec![book(&["a.mp3"], None)], vec![0]);
         with_cover.adopt(Event::Finished {
             index: 0,
-            result: Ok(written),
+            result: Ok(vec![written]),
         });
         assert_eq!(
             row(&with_cover, 0).result(),
@@ -1393,7 +1403,7 @@ mod tests {
         let mut without_cover = app(vec![book(&["a.mp3"], None)], vec![0]);
         without_cover.adopt(Event::Finished {
             index: 0,
-            result: Ok(refused),
+            result: Ok(vec![refused]),
         });
         // A cover that could not be written is a note beside a book that converted, never a
         // failure of it — so it is kept out of the result the row colours by state, which for a

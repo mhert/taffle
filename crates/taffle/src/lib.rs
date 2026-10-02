@@ -24,6 +24,10 @@
 //! without decoding a packet of it, so that a frontend can show the length of what it is about to
 //! convert before it converts any of it.
 //!
+//! [`plan_pieces`] and [`probe_layout`] are the same reading put to the cutting of a book into
+//! several files: what each input states about its length and its chapter marks, and the plan the
+//! engine makes of that, with the inputs that stated nothing named by path.
+//!
 //! # A frontend depends on this crate and no other
 //!
 //! What these workflows hand back is made of `taf-encode`'s types and `taf`'s, so those are
@@ -37,8 +41,9 @@
 //! A TAF carries an audio id, which teddycloud writes a timestamp into and which every Ogg page of
 //! the file states as its serial number. An engine that read a clock could not be held to a fixed
 //! file, so the engine takes that id as a parameter — and this is where it comes from: the current
-//! Unix time, in seconds, read in [`run_convert`] and handed over. It is the only clock read in
-//! taffle, and deliberately the only one: everything below it is a function of its inputs.
+//! Unix time, in seconds, read in [`run_convert`] and handed over as the id of the first file it
+//! writes. It is the only clock read in taffle, and deliberately the only one: everything below it
+//! is a function of its inputs.
 //!
 //! # A cover never fails a conversion
 //!
@@ -51,6 +56,7 @@ mod collision;
 mod cover;
 mod inspect;
 mod output;
+mod pieces;
 
 pub mod duration;
 
@@ -58,11 +64,12 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use taf_encode::{convert, Input};
+use taf_encode::{convert_pieces, Input};
 
 pub use collision::{refuse_collisions, CollisionError};
 pub use inspect::{inspect, read_through, ChapterRead, InspectError, Inspection};
-pub use output::default_output_path;
+pub use output::{default_output_path, output_paths, piece_path};
+pub use pieces::{plan_pieces, probe_layout, PlanError};
 
 // What the workflows above hand back and take in, from the crates the types are defined in: a
 // frontend names them through here rather than depending on `taf` and `taf-encode` itself.
@@ -71,7 +78,7 @@ pub use taf::id::{AudioId, BlockIndex};
 pub use taf::reader::ValidateError;
 pub use taf_encode::{
     ChapterError, ChapterMode, ChapterOut, Conversion, ConversionReport, ConvertError, Cover,
-    ProbeError, Progress, SilenceOpts,
+    Layout, PieceError, PiecePlan, PlannedPiece, ProbeError, Progress, SilenceOpts,
 };
 
 /// A conversion of files on disk: what goes in, where it comes out, and what is done to the audio
@@ -86,6 +93,10 @@ pub struct ConvertJob {
     pub options: Conversion,
     /// Whether the cover art an input carried is written beside the TAF.
     pub write_cover: bool,
+    /// The chapters that begin a piece — a file of its own — behind the first, as
+    /// [`PiecePlan::starts`] states them. Empty is one file, which is what a job is unless it was
+    /// planned otherwise.
+    pub piece_starts: Vec<usize>,
 }
 
 /// What a job came to: the files it left on the disk, and what the conversion itself reported.
@@ -112,6 +123,11 @@ pub struct JobOutcome {
 
 /// Converts the files `job` names into a TAF, and writes the cover art beside it.
 ///
+/// One outcome comes back per file written, in the order they were written, and never none. A job
+/// cut into pieces writes the files [`piece_path`] names, and gives piece *i* the clock's audio id
+/// plus *i*. Where a chapter a piece was to begin at never begins, there are fewer outcomes than
+/// pieces were planned.
+///
 /// The inputs are opened in the order they are stated and in front of the output, so a job naming a
 /// file that is not there leaves nothing behind at all. `progress` is the engine's own, handed
 /// through as it comes — and so is the answer it gives back, which is what stops a conversion that
@@ -120,7 +136,7 @@ pub struct JobOutcome {
 /// # Errors
 ///
 /// - [`JobError::OpenInput`] if an input could not be opened.
-/// - [`JobError::CreateOutput`] if the TAF could not be created.
+/// - [`JobError::CreateOutput`] if a TAF could not be created, naming whichever it was.
 /// - [`JobError::Convert`] if the conversion itself failed. A job of no inputs is one of those,
 ///   refused as [`ChapterError::Empty`] before a file is made for it: what the engine calls having
 ///   nothing to convert is what a caller is handed here, rather than a second name for it.
@@ -136,49 +152,79 @@ pub struct JobOutcome {
 pub fn run_convert(
     job: ConvertJob,
     progress: &mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
-) -> Result<JobOutcome, JobError> {
+) -> Result<Vec<JobOutcome>, JobError> {
+    let paths = output_paths(&job);
     let ConvertJob {
         inputs,
-        output,
         options,
         write_cover,
+        piece_starts,
+        ..
     } = job;
 
-    // Nothing to convert is nothing to name the output after either, and the engine has the word
-    // for it.
-    let Some(first) = inputs.first() else {
-        return Err(JobError::Convert(ChapterError::Empty.into()));
-    };
-    let taf_path = output.unwrap_or_else(|| default_output_path(first));
-
     let sources = opened(&inputs)?;
-    let out = File::create(&taf_path).map_err(|source| JobError::CreateOutput {
-        path: taf_path.clone(),
-        source,
-    })?;
-    // The engine writes the file in many small pieces, and a buffer in front of it turns those
-    // into few whole writes rather than a syscall apiece. Finishing the file seeks back to fill in
-    // the header block and flushes, so a buffered write that failed is reported by the conversion
-    // and not left for the drop to swallow.
-    let mut out = std::io::BufWriter::new(out);
-    let report = convert(sources, &options, clock_audio_id(), &mut out, progress)?;
+    let first_id = clock_audio_id();
 
-    // A cover that was not asked for and one that no input carried come to the same thing here:
-    // nothing beside the file, and nothing to say about it.
-    let (cover_path, cover_error) = match (write_cover, &report.cover) {
-        (true, Some(cover)) => match cover::write_beside(&taf_path, cover) {
-            Ok(path) => (Some(path), None),
-            Err(why) => (None, Some(why)),
-        },
-        _ => (None, None),
+    // A file is made when the conversion comes to it, so a piece that never begins leaves
+    // nothing behind. The engine takes a file's failure as an io error and has no room for
+    // which file it was, so that is kept here and stated in its place.
+    let mut refused = None;
+    let reports = {
+        let mut outputs = paths.iter().enumerate().map(|(index, path)| {
+            // The engine writes the file in many small pieces, and a buffer in front of it turns
+            // those into few whole writes rather than a syscall apiece. Finishing the file
+            // flushes, so a buffered write that failed is reported by the conversion.
+            File::create(path)
+                .map(|file| (piece_id(first_id, index), std::io::BufWriter::new(file)))
+                .map_err(|source| {
+                    let kind = source.kind();
+                    refused = Some(JobError::CreateOutput {
+                        path: path.clone(),
+                        source,
+                    });
+
+                    std::io::Error::from(kind)
+                })
+        });
+
+        convert_pieces(sources, &options, &piece_starts, &mut outputs, progress)
+    };
+    let reports = match refused {
+        Some(refusal) => return Err(refusal),
+        None => reports?,
     };
 
-    Ok(JobOutcome {
-        taf_path,
-        cover_path,
-        cover_error,
-        report,
-    })
+    Ok(paths
+        .into_iter()
+        .zip(reports)
+        .map(|(taf_path, report)| {
+            // A cover that was not asked for and one that no input carried come to the same thing
+            // here: nothing beside the file, and nothing to say about it.
+            let (cover_path, cover_error) = match (write_cover, &report.cover) {
+                (true, Some(cover)) => match cover::write_beside(&taf_path, cover) {
+                    Ok(path) => (Some(path), None),
+                    Err(why) => (None, Some(why)),
+                },
+                _ => (None, None),
+            };
+
+            JobOutcome {
+                taf_path,
+                cover_path,
+                cover_error,
+                report,
+            }
+        })
+        .collect())
+}
+
+/// The audio id of piece `index` of a conversion whose first file is given `first`: one further
+/// on per piece, so that no two files of one book state the same id — which is what a box tells
+/// what it has already heard by.
+fn piece_id(first: AudioId, index: usize) -> AudioId {
+    let further = u32::try_from(index).unwrap_or(u32::MAX);
+
+    AudioId::new(first.get().wrapping_add(further))
 }
 
 /// Why a job could not be run.

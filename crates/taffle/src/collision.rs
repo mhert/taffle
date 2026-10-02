@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::{default_output_path, ConvertJob};
+use crate::{output_paths, ConvertJob};
 
 /// Why a set of jobs cannot all run.
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +33,8 @@ pub enum CollisionError {
 /// Refuses jobs that would write over what they read, or over each other.
 ///
 /// Outputs are resolved the way the jobs will resolve them: as stated, or as
-/// [`default_output_path`] of the first input. A job of no inputs resolves to no output here —
+/// [`default_output_path`](crate::default_output_path) of the first input, and a job cut into
+/// pieces is held to every one of their names — the name they are derived from is none of them. A job of no inputs resolves to no output here —
 /// having nothing to convert is the engine's refusal, not a collision. Paths are compared as
 /// they were typed, exactly as the single-job check always did: two names for one file are two
 /// names here, and the conversion runs.
@@ -43,14 +44,7 @@ pub enum CollisionError {
 /// [`CollisionError::OutputIsInput`] where any job's output is any job's input, and
 /// [`CollisionError::DuplicateOutput`] where two jobs resolve to one output.
 pub fn refuse_collisions(jobs: &[ConvertJob]) -> Result<(), CollisionError> {
-    let outputs: Vec<PathBuf> = jobs
-        .iter()
-        .filter_map(|job| {
-            job.output
-                .clone()
-                .or_else(|| job.inputs.first().map(|first| default_output_path(first)))
-        })
-        .collect();
+    let outputs: Vec<PathBuf> = jobs.iter().flat_map(output_paths).collect();
 
     let inputs: HashSet<&PathBuf> = jobs.iter().flat_map(|job| &job.inputs).collect();
     if let Some(clash) = outputs.iter().find(|output| inputs.contains(output)) {
@@ -84,6 +78,7 @@ mod tests {
             output: output.map(PathBuf::from),
             options: Conversion::default(),
             write_cover: false,
+            piece_starts: Vec::new(),
         }
     }
 
@@ -128,5 +123,29 @@ mod tests {
     fn distinct_jobs_pass() {
         let jobs = [job(&["a.mp3"], None), job(&["b.mp3"], None)];
         assert!(refuse_collisions(&jobs).is_ok());
+    }
+
+    #[test]
+    fn a_piece_is_held_against_what_the_other_jobs_write_and_read() {
+        let pieces = ConvertJob {
+            piece_starts: vec![1],
+            ..job(&["x/a.m4b"], None)
+        };
+
+        // The pieces are x/a-1.taf and x/a-2.taf, and the second of them is what another job
+        // writes.
+        let writes = [pieces.clone(), job(&["b.mp3"], Some("x/a-2.taf"))];
+        assert_eq!(
+            refuse_collisions(&writes).expect_err("a collision").to_string(),
+            "the output x/a-2.taf is stated by more than one conversion: they would write over each other"
+        );
+        // Or what another job reads.
+        let reads = [pieces.clone(), job(&["x/a-1.taf"], Some("c.taf"))];
+        assert_eq!(
+            refuse_collisions(&reads).expect_err("a collision").to_string(),
+            "the output x/a-1.taf is one of the inputs: converting it would write over the audio being read"
+        );
+        // The name the pieces are derived from is not one of them, and is free.
+        assert!(refuse_collisions(&[pieces, job(&["b.mp3"], Some("x/a.taf"))]).is_ok());
     }
 }
