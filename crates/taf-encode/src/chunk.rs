@@ -28,6 +28,10 @@
 //! chapter boundary out is audio the continuous encoder saw, and a warm-up that skipped it would
 //! warm up on a stream that never existed.
 //!
+//! A chapter that begins a piece is the one place the warm-up is dropped: a piece is a file of its
+//! own, and a file begins the way a book begins — on an encoder that has heard nothing, which is
+//! the state the decoder reading that file starts in.
+//!
 //! # Which is why none of this asks how many workers there are
 //!
 //! Where the cuts fall is a function of the audio alone: the same samples make the same chunks,
@@ -61,6 +65,8 @@ pub(crate) struct Job {
     pub pcm: Vec<i16>,
     /// The chapters that begin where this chunk begins, each under its title.
     pub chapters: Vec<Option<String>>,
+    /// Whether a new file begins in front of this chunk.
+    pub piece: bool,
 }
 
 /// The audio of a conversion on its way past, cut into jobs as it goes.
@@ -79,6 +85,8 @@ pub(crate) struct Chunker {
     tail: Vec<i16>,
     /// What the next job is called, counted from the start of the conversion.
     index: usize,
+    /// Whether a piece begins where the *next* job begins.
+    piece: bool,
 }
 
 impl Chunker {
@@ -89,6 +97,7 @@ impl Chunker {
             pending: Vec::new(),
             tail: Vec::new(),
             index: 0,
+            piece: false,
         }
     }
 
@@ -115,7 +124,11 @@ impl Chunker {
     /// that began where *its* audio begins. Where nothing is buffered there is no job to hand back
     /// and the titles pile up, so several chapters in a row begin at one chunk rather than at
     /// chunks with no audio in them.
-    pub(crate) fn begin_chapter(&mut self, title: Option<String>) -> Option<Job> {
+    ///
+    /// Where the chapter begins a `piece`, the next job says so and has no warm-up: a piece is a
+    /// file of its own, and a file begins the way a book begins — on an encoder that has heard
+    /// nothing, which is the state the decoder reading that file starts in.
+    pub(crate) fn begin_chapter(&mut self, title: Option<String>, piece: bool) -> Option<Job> {
         let job = if self.buffer.is_empty() {
             None
         } else {
@@ -123,6 +136,10 @@ impl Chunker {
 
             Some(self.emit(pcm))
         };
+        if piece {
+            self.tail.clear();
+            self.piece = true;
+        }
         self.pending.push(title);
 
         job
@@ -154,6 +171,7 @@ impl Chunker {
             warmup: self.tail.clone(),
             pcm,
             chapters: std::mem::take(&mut self.pending),
+            piece: std::mem::take(&mut self.piece),
         };
         self.index += 1;
 
@@ -264,7 +282,9 @@ mod tests {
 
         let first = chunker.push_block(vec![1_000; FRAME_SAMPLES + 4]);
         assert!(first.is_none());
-        let cut = chunker.begin_chapter(Some(String::from("Two"))).unwrap();
+        let cut = chunker
+            .begin_chapter(Some(String::from("Two")), false)
+            .unwrap();
         let last = chunker.finish().unwrap();
 
         // The chunk in front of the chapter is padded out to whole packets with silence.
@@ -283,8 +303,10 @@ mod tests {
     fn chapters_with_no_audio_between_them_pile_onto_one_job() {
         let mut chunker = Chunker::new();
 
-        assert!(chunker.begin_chapter(None).is_none());
-        assert!(chunker.begin_chapter(Some(String::from("Empty"))).is_none());
+        assert!(chunker.begin_chapter(None, false).is_none());
+        assert!(chunker
+            .begin_chapter(Some(String::from("Empty")), false)
+            .is_none());
         assert!(chunker.push_block(level_packets(1, 500)).is_none());
         let job = chunker.finish().unwrap();
 
@@ -312,7 +334,7 @@ mod tests {
 
         let first = chunker.push_block(vec![1_000; FRAME_SAMPLES / 2]);
         assert!(first.is_none());
-        let cut = chunker.begin_chapter(None).unwrap();
+        let cut = chunker.begin_chapter(None, false).unwrap();
         assert!(chunker.push_block(level_packets(1, 2_000)).is_none());
         let last = chunker.finish().unwrap();
 
@@ -328,7 +350,7 @@ mod tests {
         // A chapter every packet: no chunk on its own carries a whole warm-up.
         for level in [1_000, 2_000, 3_000] {
             assert!(chunker.push_block(level_packets(1, level)).is_none());
-            assert!(chunker.begin_chapter(None).is_some());
+            assert!(chunker.begin_chapter(None, false).is_some());
         }
         let last = chunker.finish().unwrap();
 
@@ -376,5 +398,50 @@ mod tests {
             job.pcm.len(),
             (TARGET_PACKETS - SNAP_PACKETS) * FRAME_SAMPLES
         );
+    }
+
+    #[test]
+    fn a_piece_begins_on_an_encoder_that_has_heard_nothing() {
+        let mut chunker = Chunker::new();
+
+        assert!(chunker.push_block(level_packets(20, 1_000)).is_none());
+        let front = chunker.begin_chapter(None, true).unwrap();
+        assert!(chunker.push_block(level_packets(3, 2_000)).is_none());
+        let piece = chunker.finish().unwrap();
+
+        // The chunk in front of the cut is the end of the file in front of it.
+        assert!(!front.piece);
+        assert!(piece.piece);
+        assert!(piece.warmup.is_empty(), "a file begins without a warm-up");
+        assert_eq!(piece.chapters, [None]);
+    }
+
+    #[test]
+    fn a_chapter_that_begins_no_piece_keeps_the_warm_up() {
+        let mut chunker = Chunker::new();
+
+        assert!(chunker.push_block(level_packets(20, 1_000)).is_none());
+        let _ = chunker.begin_chapter(None, false).unwrap();
+        assert!(chunker.push_block(level_packets(3, 2_000)).is_none());
+        let chapter = chunker.finish().unwrap();
+
+        assert!(!chapter.piece);
+        assert_eq!(chapter.warmup.len(), WARMUP_PACKETS * FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn only_the_first_chunk_of_a_piece_is_where_it_begins() {
+        let mut chunker = Chunker::new();
+
+        assert!(chunker.begin_chapter(None, true).is_none());
+        assert!(chunker.push_block(level_packets(3, 1_000)).is_none());
+        let first = chunker.begin_chapter(None, false).unwrap();
+        assert!(chunker.push_block(level_packets(3, 2_000)).is_none());
+        let second = chunker.finish().unwrap();
+
+        assert!(first.piece);
+        assert!(!second.piece);
+        // And the chunk behind it warms up on the piece's own audio, as any chunk does.
+        assert_eq!(second.warmup.len(), 3 * FRAME_SAMPLES);
     }
 }

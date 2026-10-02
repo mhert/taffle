@@ -190,7 +190,8 @@ pub enum Progress {
         /// Which input, counted from the first one handed in.
         input_index: usize,
     },
-    /// The audio encoded so far, in frames of one channel at 48 kHz. Only ever grows.
+    /// The audio encoded so far, in frames of one channel at 48 kHz. Only ever grows, and counts
+    /// over every file of the conversion rather than beginning again at each.
     Encoded {
         /// How many of those frames have gone into the file.
         samples_done: u64,
@@ -222,6 +223,67 @@ pub struct ConversionReport {
     pub cover: Option<Cover>,
     /// The audio id the file was written with, as it was handed in.
     pub audio_id: AudioId,
+}
+
+/// The file a conversion is writing into.
+struct Open<W: Write + Seek> {
+    /// The file itself.
+    sink: PacketSink<W>,
+    /// The audio id it was opened with.
+    audio_id: AudioId,
+    /// The chapters it holds so far.
+    chapters: Vec<ChapterOut>,
+}
+
+impl<W: Write + Seek> Open<W> {
+    /// Opens the next file `outputs` has.
+    ///
+    /// # Errors
+    ///
+    /// [`ConvertError::Io`] if there is no output left or the one there is could not be made, and
+    /// what [`PacketSink::new`] fails with otherwise.
+    fn next(
+        outputs: &mut dyn Iterator<Item = std::io::Result<(AudioId, W)>>,
+    ) -> Result<Self, ConvertError> {
+        let (audio_id, out) = outputs
+            .next()
+            .ok_or_else(|| std::io::Error::other("no output is left for the file being begun"))??;
+
+        Ok(Self {
+            sink: PacketSink::new(audio_id, out)?,
+            audio_id,
+            chapters: Vec::new(),
+        })
+    }
+
+    /// Finishes the file.
+    ///
+    /// # Errors
+    ///
+    /// What [`PacketSink::finish`] fails with.
+    fn close(self) -> Result<Closed, ConvertError> {
+        let Self {
+            sink,
+            audio_id,
+            chapters,
+        } = self;
+
+        Ok(Closed {
+            audio_id,
+            chapters,
+            frames: sink.finish()?,
+        })
+    }
+}
+
+/// A file a conversion has finished writing.
+struct Closed {
+    /// The audio id it was written with.
+    audio_id: AudioId,
+    /// The chapters it holds.
+    chapters: Vec<ChapterOut>,
+    /// The frames of one channel it carries.
+    frames: u64,
 }
 
 /// Converts `inputs` into the TAF `out`, and states what it came to.
@@ -280,66 +342,135 @@ pub fn convert<W: Write + Seek>(
     out: W,
     progress: &mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
 ) -> Result<ConversionReport, ConvertError> {
+    let mut outputs = std::iter::once(Ok((audio_id, out)));
+    let (_, report) = run(inputs, opts, &[], &mut outputs, progress)?;
+
+    Ok(report)
+}
+
+/// Converts `inputs` the way [`convert`] does, into one TAF per piece, and states what each of
+/// them came to.
+///
+/// A piece is a run of whole chapters that goes into a file of its own: the book is read once,
+/// and where a chapter that begins a piece begins, the file being written is finished and the next
+/// one begun. `piece_starts` names those chapters as indices into the conversion's chapter plan,
+/// in order and never 0 — chapter 0 is the one the book opens with, which begins the first file
+/// and no second one; with several inputs and no stated chapters, chapter *i* is input *i*.
+/// `outputs` is asked for its next item once at the start and once more each time a piece
+/// begins, and an item is the audio id and the writer of that file. The reports come back one
+/// per file written, in the order they were written, and never none.
+///
+/// Every piece is cut on an encoder that has heard nothing, the way a book begins — which is the
+/// state the decoder reading that file starts in. [`Progress::Encoded`] counts over every file
+/// rather than beginning again at each. Everything else [`convert`] states holds piece by piece:
+/// with no piece starts this is [`convert`], to the byte.
+///
+/// # A cut that is not made
+///
+/// A chapter that begins a piece may never begin at all — the silence operations trimmed it away,
+/// or it lies in what [`Conversion::skip_trailing`] leaves off — and a cut may find no audio on
+/// one side of it, at the start of a file that holds nothing yet or in front of a chapter that
+/// brings nothing of its own. Either way the cut is not made: the chapter stays in the file in
+/// front, no output is asked for, and fewer reports come back than cuts were stated.
+///
+/// # Errors
+///
+/// - [`ConvertError::Chapters`] if there are no inputs, the offsets stated are no plan, or the
+///   piece starts are no list of cuts ([`ChapterError::PieceStarts`]) — the last two before any
+///   output is asked for.
+/// - [`ConvertError::Input`] if an input could not be read, decoded, or brought to 48 kHz stereo.
+/// - [`ConvertError::Encode`] if libopus refused a frame.
+/// - [`ConvertError::Taf`] or [`ConvertError::Io`] if a file could not be written.
+/// - [`ConvertError::Io`] as well if no output is left for a piece that begins, if `outputs`
+///   failed to hand one over, or if the thread reading the inputs or one of the threads encoding
+///   them failed outright.
+/// - [`ConvertError::Cancelled`] if `progress` asked the conversion to stop.
+pub fn convert_pieces<W: Write + Seek>(
+    inputs: Vec<Input>,
+    opts: &Conversion,
+    piece_starts: &[usize],
+    outputs: &mut dyn Iterator<Item = std::io::Result<(AudioId, W)>>,
+    progress: &mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
+) -> Result<Vec<ConversionReport>, ConvertError> {
+    let (mut reports, last) = run(inputs, opts, piece_starts, outputs, progress)?;
+    reports.push(last);
+
+    Ok(reports)
+}
+
+/// The conversion both of them are: the files finished in front of the last one, and the last.
+fn run<W: Write + Seek>(
+    inputs: Vec<Input>,
+    opts: &Conversion,
+    piece_starts: &[usize],
+    outputs: &mut dyn Iterator<Item = std::io::Result<(AudioId, W)>>,
+    progress: &mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
+) -> Result<(Vec<ConversionReport>, ConversionReport), ConvertError> {
     if inputs.is_empty() {
         return Err(ChapterError::Empty.into());
     }
     if let ChapterMode::Explicit(offsets) = &opts.chapter_mode {
         increasing(offsets)?;
     }
+    cuts(piece_starts)?;
 
     let workers = opts.workers.map_or_else(
         || std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
         std::num::NonZeroUsize::get,
     );
 
-    let mut sink = PacketSink::new(audio_id, out)?;
-    let mut chapters: Vec<ChapterOut> = Vec::new();
+    let first = Open::next(outputs)?;
 
-    let produced = std::thread::scope(|scope| -> Result<Produced, ConvertError> {
-        let (feed_tx, feed_rx) = std::sync::mpsc::sync_channel(FEED_DEPTH);
-        let decoding = scope.spawn(move || produce(inputs, opts, &feed_tx));
+    let (produced, closed, mut open) = std::thread::scope(
+        |scope| -> Result<(Produced, Vec<Closed>, Open<W>), ConvertError> {
+            let (feed_tx, feed_rx) = std::sync::mpsc::sync_channel(FEED_DEPTH);
+            let decoding = scope.spawn(move || produce(inputs, opts, piece_starts, &feed_tx));
 
-        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<Job>(JOB_DEPTH);
-        // The results channel is unbounded on purpose: what bounds the memory is how many jobs
-        // exist at once, and that is the job channel plus the workers holding one each. A bounded
-        // results channel could instead deadlock — every worker blocked handing back, the calling
-        // thread blocked handing out.
-        let (batch_tx, batch_rx) = std::sync::mpsc::channel::<Batch>();
-        // The queue belongs to the workers and to nobody else, so a pool that died to the last of
-        // them takes it with it — which is what makes handing a job over a failure to state rather
-        // than a wait for somebody who is never coming.
-        let queue = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
-        for _ in 0..workers {
-            let batch_tx = batch_tx.clone();
-            let queue = std::sync::Arc::clone(&queue);
-            scope.spawn(move || {
-                // A job is taken under the lock and encoded outside of it, so the workers share a
-                // queue and never an encoder. What a batch is worth once the calling thread has
-                // given up is nothing, which is why a send that finds nobody there is no news.
-                while let Some(job) = next_job(&queue) {
-                    let index = job.index;
-                    let _ = batch_tx.send((index, encode_job(&job)));
-                }
-            });
-        }
-        drop(batch_tx);
-        drop(queue);
+            let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<Job>(JOB_DEPTH);
+            // The results channel is unbounded on purpose: what bounds the memory is how many jobs
+            // exist at once, and that is the job channel plus the workers holding one each. A
+            // bounded results channel could instead deadlock — every worker blocked handing back,
+            // the calling thread blocked handing out.
+            let (batch_tx, batch_rx) = std::sync::mpsc::channel::<Batch>();
+            // The queue belongs to the workers and to nobody else, so a pool that died to the last
+            // of them takes it with it — which is what makes handing a job over a failure to state
+            // rather than a wait for somebody who is never coming.
+            let queue = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
+            for _ in 0..workers {
+                let batch_tx = batch_tx.clone();
+                let queue = std::sync::Arc::clone(&queue);
+                scope.spawn(move || {
+                    // A job is taken under the lock and encoded outside of it, so the workers share
+                    // a queue and never an encoder. What a batch is worth once the calling thread
+                    // has given up is nothing, which is why a send that finds nobody there is no
+                    // news.
+                    while let Some(job) = next_job(&queue) {
+                        let index = job.index;
+                        let _ = batch_tx.send((index, encode_job(&job)));
+                    }
+                });
+            }
+            drop(batch_tx);
+            drop(queue);
 
-        let mut collector = Collector::new(&mut sink, &mut chapters, progress);
-        // The feeding takes the feeds over and lets go of them when it is done, which is what
-        // stops a producer whose consumer failed — at a failure and at the end of the audio alike.
-        let fed = feeding(&mut collector, feed_rx, &job_tx, &batch_rx);
-        // And letting go of the queue is what tells the workers nothing further is coming.
-        drop(job_tx);
-        let outcome = fed.and_then(|()| collector.drain(&batch_rx));
+            let mut collector = Collector::new(first, outputs, progress);
+            // The feeding takes the feeds over and lets go of them when it is done, which is what
+            // stops a producer whose consumer failed — at a failure and at the end of the audio
+            // alike.
+            let fed = feeding(&mut collector, feed_rx, &job_tx, &batch_rx);
+            // And letting go of the queue is what tells the workers nothing further is coming.
+            drop(job_tx);
+            let outcome = fed.and_then(|()| collector.drain(&batch_rx));
 
-        let produced = decoding
-            .join()
-            .map_err(|_| ConvertError::Io(std::io::Error::other("the decoding thread failed")))?;
-        outcome?;
+            let produced = decoding.join().map_err(|_| {
+                ConvertError::Io(std::io::Error::other("the decoding thread failed"))
+            })?;
+            outcome?;
+            let (closed, open) = collector.finish();
 
-        produced
-    })?;
+            Ok((produced?, closed, open))
+        },
+    )?;
 
     if let ChapterMode::Explicit(offsets) = &opts.chapter_mode {
         within(offsets, produced.frames)?;
@@ -350,34 +481,55 @@ pub fn convert<W: Write + Seek>(
     }
     // A TAF's first block holds an audio page, so a conversion that came out with no audio still
     // writes the one 60 ms frame of silence that makes it a file.
-    if sink.frames() == 0 {
+    if open.sink.frames() == 0 {
         let silence = encode_job(&Job {
             index: 0,
             warmup: Vec::new(),
             pcm: vec![0; FRAME_SAMPLES],
             chapters: Vec::new(),
+            piece: false,
         })?;
         for packet in &silence {
-            sink.push_packet(packet)?;
+            open.sink.push_packet(packet)?;
         }
     }
-    let frames = sink.finish()?;
+    let mut last = open.close()?;
 
+    let Produced {
+        cover,
+        opening_title,
+        ..
+    } = produced;
     // A file whose audio came to nothing still begins the chapter every TAF begins at block 0.
-    if chapters.is_empty() {
-        chapters.push(ChapterOut {
+    if last.chapters.is_empty() {
+        last.chapters.push(ChapterOut {
             page: BlockIndex::new(0),
             start: Duration::ZERO,
-            title: produced.opening_title,
+            title: opening_title,
         });
     }
 
-    Ok(ConversionReport {
-        chapters,
-        duration: playtime(frames),
-        cover: produced.cover,
-        audio_id,
-    })
+    let reported = |file: Closed| ConversionReport {
+        chapters: file.chapters,
+        duration: playtime(file.frames),
+        cover: cover.clone(),
+        audio_id: file.audio_id,
+    };
+
+    Ok((closed.into_iter().map(&reported).collect(), reported(last)))
+}
+
+/// Whether the chapters stated to begin a piece could be a list of cuts, which needs no audio to
+/// answer and is answered before a file is asked for.
+fn cuts(piece_starts: &[usize]) -> Result<(), ChapterError> {
+    let increasing = piece_starts
+        .windows(2)
+        .all(|pair| matches!(pair, [earlier, later] if earlier < later));
+    if piece_starts.first() == Some(&0) || !increasing {
+        return Err(ChapterError::PieceStarts);
+    }
+
+    Ok(())
 }
 
 /// Why a conversion could not be made.
@@ -464,7 +616,7 @@ fn feeding<W: Write + Seek>(
                 collector.reached(input_index)?;
                 None
             }
-            Feed::Chapter(title) => chunker.begin_chapter(title),
+            Feed::Chapter { title, piece } => chunker.begin_chapter(title, piece),
             Feed::Block(block) => chunker.push_block(block),
         };
         if let Some(job) = job {
@@ -481,13 +633,19 @@ fn feeding<W: Write + Seek>(
 /// The writing end of the pool: batches in job order, chapters where their chunks begin, and
 /// the progress the caller watches.
 struct Collector<'a, W: Write + Seek> {
-    sink: &'a mut PacketSink<W>,
-    chapters: &'a mut Vec<ChapterOut>,
+    /// The file being written.
+    open: Open<W>,
+    /// The files finished in front of it, in the order they were written.
+    closed: Vec<Closed>,
+    /// The frames those carry, which is where the count of the audio encoded so far goes on from.
+    behind: u64,
+    /// Where the file of every piece behind the first comes from.
+    outputs: &'a mut dyn Iterator<Item = std::io::Result<(AudioId, W)>>,
     progress: &'a mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
     /// Batches that arrived ahead of their turn, by job index.
     pending: std::collections::BTreeMap<usize, Result<Vec<Vec<u8>>, opus::Error>>,
-    /// The chapters of jobs not yet written, by job index.
-    marks: std::collections::BTreeMap<usize, Vec<Option<String>>>,
+    /// Whether a piece begins at a job not yet written, and its chapters, by job index.
+    marks: std::collections::BTreeMap<usize, (bool, Vec<Option<String>>)>,
     /// How many jobs went out.
     dispatched: usize,
     /// The job whose batch is written next.
@@ -495,21 +653,43 @@ struct Collector<'a, W: Write + Seek> {
 }
 
 impl<'a, W: Write + Seek> Collector<'a, W> {
-    /// A collector at the start of a conversion, with nothing out and nothing waiting.
+    /// A collector at the start of a conversion, writing into `open`, with nothing out and nothing
+    /// waiting.
     fn new(
-        sink: &'a mut PacketSink<W>,
-        chapters: &'a mut Vec<ChapterOut>,
+        open: Open<W>,
+        outputs: &'a mut dyn Iterator<Item = std::io::Result<(AudioId, W)>>,
         progress: &'a mut dyn FnMut(Progress) -> std::ops::ControlFlow<()>,
     ) -> Self {
         Self {
-            sink,
-            chapters,
+            open,
+            closed: Vec::new(),
+            behind: 0,
+            outputs,
             progress,
             pending: std::collections::BTreeMap::new(),
             marks: std::collections::BTreeMap::new(),
             dispatched: 0,
             next: 0,
         }
+    }
+
+    /// What the conversion wrote: the files it finished, and the one it is still in.
+    fn finish(self) -> (Vec<Closed>, Open<W>) {
+        (self.closed, self.open)
+    }
+
+    /// Finishes the file being written and begins the next one.
+    ///
+    /// # Errors
+    ///
+    /// What opening the next file or finishing this one fails with.
+    fn cut(&mut self) -> Result<(), ConvertError> {
+        let next = Open::next(&mut *self.outputs)?;
+        let closed = std::mem::replace(&mut self.open, next).close()?;
+        self.behind = self.behind.saturating_add(closed.frames);
+        self.closed.push(closed);
+
+        Ok(())
     }
 
     /// The conversion has reached an input, which is the caller's to hear about.
@@ -537,7 +717,8 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
         jobs: &std::sync::mpsc::SyncSender<Job>,
         batches: &std::sync::mpsc::Receiver<Batch>,
     ) -> Result<(), ConvertError> {
-        self.marks.insert(job.index, job.chapters.clone());
+        self.marks
+            .insert(job.index, (job.piece, job.chapters.clone()));
         self.dispatched += 1;
         // A send fails only when every worker is gone, which they only are on their own failure.
         // There is nobody left to encode this job, so what is left to do is write the jobs that
@@ -588,21 +769,27 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
 
         while let Some(batch) = self.pending.remove(&self.next) {
             let batch = batch?;
-            for title in self.marks.remove(&self.next).unwrap_or_default() {
-                self.sink.begin_chapter()?;
+            let (piece, chapters) = self.marks.remove(&self.next).unwrap_or_default();
+            // A cut has audio on both sides of it: a piece that begins where the file holds
+            // nothing yet is that file, and one that brings no audio would be a file of nothing.
+            if piece && self.open.sink.frames() > 0 && !batch.is_empty() {
+                self.cut()?;
+            }
+            for title in chapters {
+                self.open.sink.begin_chapter()?;
                 place(
-                    self.chapters,
+                    &mut self.open.chapters,
                     ChapterOut {
-                        page: self.sink.block(),
-                        start: position(self.sink.frames()),
+                        page: self.open.sink.block(),
+                        start: position(self.open.sink.frames()),
                         title,
                     },
                 );
             }
             for packet in &batch {
-                self.sink.push_packet(packet)?;
+                self.open.sink.push_packet(packet)?;
                 let encoded = Progress::Encoded {
-                    samples_done: self.sink.frames(),
+                    samples_done: self.behind.saturating_add(self.open.sink.frames()),
                 };
                 if (self.progress)(encoded).is_break() {
                     return Err(ConvertError::Cancelled);
@@ -682,9 +869,7 @@ fn playtime(frames: u64) -> Duration {
     clippy::indexing_slicing
 )]
 mod tests {
-    use super::{
-        Collector, ConvertError, Input, Job, PacketSink, Progress, WriterError, WriterIoError,
-    };
+    use super::{Collector, ConvertError, Input, Job, Open, Progress, WriterError, WriterIoError};
     use crate::encode::FRAME;
     use std::io::{self, Cursor};
     use std::time::Duration;
@@ -698,6 +883,15 @@ mod tests {
             warmup: Vec::new(),
             pcm: Vec::new(),
             chapters,
+            piece: false,
+        }
+    }
+
+    /// A job of `index` carrying `chapters`, in front of which a piece begins.
+    fn piece(index: usize, chapters: Vec<Option<String>>) -> Job {
+        Job {
+            piece: true,
+            ..job(index, chapters)
         }
     }
 
@@ -714,21 +908,21 @@ mod tests {
     #[test]
     fn batches_that_come_back_out_of_turn_are_written_in_the_order_the_chunks_were_cut() {
         let mut file = Cursor::new(Vec::new());
-        let mut sink = PacketSink::new(AudioId::new(7), &mut file).unwrap();
-        let mut chapters = Vec::new();
         let mut done = Vec::new();
-        let mut progress = |event| {
-            if let Progress::Encoded { samples_done } = event {
-                done.push(samples_done);
-            }
-
-            std::ops::ControlFlow::Continue(())
-        };
         let (jobs, waiting) = std::sync::mpsc::sync_channel(2);
         let (worker, batches) = std::sync::mpsc::channel();
 
-        {
-            let mut collector = Collector::new(&mut sink, &mut chapters, &mut progress);
+        let chapters = {
+            let mut progress = |event| {
+                if let Progress::Encoded { samples_done } = event {
+                    done.push(samples_done);
+                }
+
+                std::ops::ControlFlow::Continue(())
+            };
+            let mut outputs = std::iter::once(Ok((AudioId::new(7), &mut file)));
+            let open = Open::next(&mut outputs).unwrap();
+            let mut collector = Collector::new(open, &mut outputs, &mut progress);
             collector
                 .dispatch(job(0, Vec::new()), &jobs, &batches)
                 .unwrap();
@@ -741,9 +935,12 @@ mod tests {
             // Which is a pool that has run out of work and let go, and so a drain that ends.
             drop(worker);
             collector.drain(&batches).unwrap();
-        }
+
+            let (closed, open) = collector.finish();
+            assert!(closed.is_empty(), "nothing began a second file");
+            open.close().unwrap().chapters
+        };
         drop(waiting);
-        sink.finish().unwrap();
         let written = file.into_inner();
         let at = |mark: u8, body: usize| {
             let run = vec![mark; body];
@@ -770,10 +967,10 @@ mod tests {
         // the batch of a job already out that is never coming back. Waiting for either would be
         // waiting forever, so what a conversion gets is the one failure a dead thread leaves.
         let mut file = Cursor::new(Vec::new());
-        let mut sink = PacketSink::new(AudioId::new(7), &mut file).unwrap();
-        let mut chapters = Vec::new();
         let mut progress = |_| std::ops::ControlFlow::Continue(());
-        let mut collector = Collector::new(&mut sink, &mut chapters, &mut progress);
+        let mut outputs = std::iter::once(Ok((AudioId::new(7), &mut file)));
+        let open = Open::next(&mut outputs).unwrap();
+        let mut collector = Collector::new(open, &mut outputs, &mut progress);
         let (jobs, waiting) = std::sync::mpsc::sync_channel(1);
         let (worker, batches) = std::sync::mpsc::channel();
         drop(waiting);
@@ -788,7 +985,104 @@ mod tests {
             matches!(&refusal, ConvertError::Io(failure) if failure.to_string() == "an encoding worker failed"),
             "{refusal:?}"
         );
-        assert!(chapters.is_empty(), "nothing of that job was written");
+        let (_, open) = collector.finish();
+        assert!(open.chapters.is_empty(), "nothing of that job was written");
+    }
+
+    #[test]
+    fn a_piece_is_a_file_of_its_own_from_the_chunk_it_begins_at() {
+        let mut first = Cursor::new(Vec::new());
+        let mut second = Cursor::new(Vec::new());
+        let mut done = Vec::new();
+        let (jobs, waiting) = std::sync::mpsc::sync_channel(2);
+        let (worker, batches) = std::sync::mpsc::channel();
+
+        let (closed, last) = {
+            let mut progress = |event| {
+                if let Progress::Encoded { samples_done } = event {
+                    done.push(samples_done);
+                }
+
+                std::ops::ControlFlow::Continue(())
+            };
+            let mut outputs = [
+                (AudioId::new(7), &mut first),
+                (AudioId::new(8), &mut second),
+            ]
+            .into_iter()
+            .map(Ok);
+            let open = Open::next(&mut outputs).unwrap();
+            let mut collector = Collector::new(open, &mut outputs, &mut progress);
+            collector
+                .dispatch(job(0, vec![None]), &jobs, &batches)
+                .unwrap();
+            collector
+                .dispatch(piece(1, vec![Some(String::from("Two"))]), &jobs, &batches)
+                .unwrap();
+            worker.send((0, Ok(vec![packet(11, 80)]))).unwrap();
+            worker.send((1, Ok(vec![packet(22, 90)]))).unwrap();
+            drop(worker);
+            collector.drain(&batches).unwrap();
+
+            let (closed, open) = collector.finish();
+            (closed, open.close().unwrap())
+        };
+        drop(waiting);
+        let holds = |file: &Cursor<Vec<u8>>, mark: u8, body: usize| {
+            let run = vec![mark; body];
+            file.get_ref().windows(body).any(|window| window == run)
+        };
+
+        // The first file holds the first chunk and is closed; the second holds the piece.
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].audio_id, AudioId::new(7));
+        assert_eq!(closed[0].frames, u64::from(FRAME));
+        assert_eq!(closed[0].chapters.len(), 1);
+        assert!(holds(&first, 11, 80) && !holds(&first, 22, 90));
+        assert!(holds(&second, 22, 90) && !holds(&second, 11, 80));
+        // The piece's chapter begins where its own file does.
+        assert_eq!(last.audio_id, AudioId::new(8));
+        assert_eq!(last.frames, u64::from(FRAME));
+        assert_eq!(last.chapters.len(), 1);
+        assert_eq!(last.chapters[0].title.as_deref(), Some("Two"));
+        assert_eq!(last.chapters[0].page.get(), 0);
+        assert_eq!(last.chapters[0].start, Duration::ZERO);
+        // And the audio encoded so far goes on counting over the cut.
+        assert_eq!(done, [u64::from(FRAME), 2 * u64::from(FRAME)]);
+    }
+
+    #[test]
+    fn a_cut_with_no_audio_on_one_side_of_it_is_no_cut() {
+        // One output, so a cut that was made anyway would find no file to begin and fail.
+        let mut file = Cursor::new(Vec::new());
+        let (jobs, waiting) = std::sync::mpsc::sync_channel(4);
+        let (worker, batches) = std::sync::mpsc::channel();
+
+        let last = {
+            let mut progress = |_| std::ops::ControlFlow::Continue(());
+            let mut outputs = std::iter::once(Ok((AudioId::new(7), &mut file)));
+            let open = Open::next(&mut outputs).unwrap();
+            let mut collector = Collector::new(open, &mut outputs, &mut progress);
+            // A piece that begins where the file holds nothing yet is that file.
+            collector
+                .dispatch(piece(0, vec![None]), &jobs, &batches)
+                .unwrap();
+            // And one that brings no audio of its own would be a file of nothing.
+            collector
+                .dispatch(piece(1, vec![Some(String::from("End"))]), &jobs, &batches)
+                .unwrap();
+            worker.send((0, Ok(vec![packet(11, 80)]))).unwrap();
+            worker.send((1, Ok(Vec::new()))).unwrap();
+            drop(worker);
+            collector.drain(&batches).unwrap();
+
+            let (closed, open) = collector.finish();
+            assert!(closed.is_empty());
+            open.close().unwrap()
+        };
+        drop(waiting);
+
+        assert_eq!(last.chapters.len(), 2);
     }
 
     #[test]

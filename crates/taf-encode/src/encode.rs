@@ -295,6 +295,7 @@ mod tests {
             warmup: ramp(warmup * FRAME_SAMPLES),
             pcm: ramp(packets * FRAME_SAMPLES),
             chapters: Vec::new(),
+            piece: false,
         }
     }
 
@@ -371,6 +372,7 @@ mod tests {
             warmup: Vec::new(),
             pcm: samples.clone(),
             chapters: Vec::new(),
+            piece: false,
         };
         let continuous = decoded_stream(&[encode_job(&whole).unwrap()]);
 
@@ -435,6 +437,7 @@ mod tests {
             warmup: tail(WARMUP_PACKETS),
             pcm: chunk.clone(),
             chapters: Vec::new(),
+            piece: false,
         })
         .unwrap();
         let long = encode_job(&Job {
@@ -442,6 +445,7 @@ mod tests {
             warmup: tail(32),
             pcm: chunk,
             chapters: Vec::new(),
+            piece: false,
         })
         .unwrap();
 
