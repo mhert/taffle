@@ -50,14 +50,18 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     // Whatever is said next — the file that was written, or why it was not — begins on a line of
     // its own.
     line.finish();
-    let outcome = outcome.map_err(in_clock_time)?;
+    let outcomes = outcome.map_err(in_clock_time)?;
 
     // A plan nobody typed is settled by the conversion, and this is where it stands: the chapters
     // the file holds.
     if planned.is_none() {
-        warn_over_limit(outcome.report.chapters.len());
+        for outcome in &outcomes {
+            warn_over_limit(outcome.report.chapters.len());
+        }
     }
-    report(&outcome);
+    for outcome in &outcomes {
+        report(outcome);
+    }
 
     Ok(())
 }
@@ -101,6 +105,7 @@ fn job(args: ConvertArgs) -> ConvertJob {
             workers: None,
         },
         write_cover: !no_cover,
+        piece_starts: Vec::new(),
     }
 }
 

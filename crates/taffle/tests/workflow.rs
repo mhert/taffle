@@ -19,8 +19,9 @@
     clippy::unwrap_used
 )]
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
 use taf::digest::Sha1;
@@ -28,7 +29,8 @@ use taf::header::{HeaderView, BLOCK_LEN};
 use taf::reader::{Summary, Validator};
 use taf_encode::{ChapterError, Conversion, ConvertError, Progress};
 use taffle::{
-    default_output_path, probe_duration, run_convert, ConvertJob, JobError, JobOutcome, ProbeError,
+    default_output_path, plan_pieces, probe_duration, probe_layout, run_convert, ConvertJob,
+    JobError, JobOutcome, ProbeError,
 };
 use tempfile::TempDir;
 
@@ -57,19 +59,34 @@ fn job(inputs: Vec<PathBuf>, output: Option<PathBuf>) -> ConvertJob {
         output,
         options: Conversion::default(),
         write_cover: true,
+        piece_starts: Vec::new(),
     }
 }
 
-/// Runs `job` and hands over what it came to, with every progress event it reported.
+/// Runs `job` and hands over what its one file came to, with every progress event it reported.
 fn run(job: ConvertJob) -> (Result<JobOutcome, JobError>, Vec<Progress>) {
+    let (outcomes, progress) = run_pieces(job);
+
+    (
+        outcomes.map(|mut outcomes| {
+            assert_eq!(outcomes.len(), 1, "a job of one file");
+            outcomes.remove(0)
+        }),
+        progress,
+    )
+}
+
+/// Runs `job` and hands over what every file of it came to, with every progress event it
+/// reported.
+fn run_pieces(job: ConvertJob) -> (Result<Vec<JobOutcome>, JobError>, Vec<Progress>) {
     let mut progress = Vec::new();
-    let outcome = run_convert(job, &mut |event| {
+    let outcomes = run_convert(job, &mut |event| {
         progress.push(event);
 
         std::ops::ControlFlow::Continue(())
     });
 
-    (outcome, progress)
+    (outcomes, progress)
 }
 
 /// What time it is, the way the audio id of a conversion counts it.
@@ -467,4 +484,90 @@ fn a_path_that_is_not_there_states_no_length() {
 
     assert!(matches!(error, ProbeError::Io(_)), "{error:?}");
     assert_eq!(error.to_string(), "reading the input failed");
+}
+
+#[test]
+fn a_book_planned_into_pieces_is_one_file_per_piece_with_the_cover_beside_each() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = dir.path().join(BOOK);
+    fs::copy(fixture(BOOK), &book).expect("the fixture copies in");
+
+    let mut job = job(vec![book.clone()], None);
+    let layouts = [probe_layout(&book).ok()];
+    let plan = plan_pieces(&job, &layouts, NonZeroUsize::new(2).expect("two")).expect("a plan");
+    job.piece_starts = plan.starts();
+
+    let (outcomes, _) = run_pieces(job);
+    let outcomes = outcomes.expect("the book converts");
+
+    assert_eq!(outcomes.len(), 2);
+    let mut ids = Vec::new();
+    for (at, outcome) in outcomes.iter().enumerate() {
+        let number = at + 1;
+        assert_eq!(
+            outcome.taf_path,
+            dir.path().join(format!("tiny-{number}.taf"))
+        );
+        assert_eq!(
+            outcome.cover_path,
+            Some(dir.path().join(format!("tiny-{number}.png")))
+        );
+        let (_, chapters, audio_id) = validate(&outcome.taf_path);
+        assert_eq!(chapters, [0]);
+        assert_eq!(audio_id, outcome.report.audio_id.get());
+        // The book's two chapters are five seconds each, give or take the frame a cut fills out.
+        let apart = outcome.report.duration.abs_diff(Duration::from_secs(5));
+        assert!(
+            apart <= Duration::from_millis(200),
+            "piece {number}: {apart:?}"
+        );
+        ids.push(audio_id);
+    }
+    // Each piece is a file a box tells apart from the others: the clock, and the piece's place.
+    assert_eq!(ids[1], ids[0] + 1);
+    assert!(!dir.path().join("tiny.taf").exists());
+}
+
+#[test]
+fn fewer_pieces_than_planned_keep_the_names_the_plan_gave_them() {
+    let dir = TempDir::new().expect("a directory of its own");
+
+    // The book has two chapters, so the chapter a third piece was to begin at never begins.
+    let (outcomes, _) = run_pieces(ConvertJob {
+        piece_starts: vec![1, 5],
+        ..job(vec![fixture(BOOK)], Some(dir.path().join("Book.taf")))
+    });
+    let outcomes = outcomes.expect("the book converts");
+
+    let written: Vec<_> = outcomes.iter().map(|outcome| &outcome.taf_path).collect();
+    assert_eq!(
+        written,
+        [
+            &dir.path().join("Book-1.taf"),
+            &dir.path().join("Book-2.taf")
+        ]
+    );
+    assert!(
+        !dir.path().join("Book-3.taf").exists(),
+        "no file for no piece"
+    );
+}
+
+#[test]
+fn a_piece_that_cannot_be_made_is_refused_under_its_own_name() {
+    let dir = TempDir::new().expect("a directory of its own");
+    // The second piece's name is taken by a directory, which no file can be created over.
+    fs::create_dir(dir.path().join("Book-2.taf")).expect("the directory is made");
+
+    let (outcomes, _) = run_pieces(ConvertJob {
+        piece_starts: vec![1],
+        ..job(vec![fixture(BOOK)], Some(dir.path().join("Book.taf")))
+    });
+
+    match outcomes.expect_err("the second piece has nowhere to go") {
+        JobError::CreateOutput { path, .. } => {
+            assert_eq!(path, dir.path().join("Book-2.taf"));
+        }
+        other => panic!("{other:?}"),
+    }
 }
