@@ -5,6 +5,10 @@
 //! and a finished file comes out of the other end. Everything else here is one stage of that, and
 //! public because a stage is worth having on its own.
 //!
+//! [`convert_pieces()`] is the same conversion written into several files rather than one: the
+//! book is still read once, and at the chapters stated to begin a piece the file being written is
+//! finished and the next one begun.
+//!
 //! [`probe_duration()`] is beside all of that rather than a part of it: how long an input states it
 //! plays, read off its headers, for a caller that wants a length before it wants a conversion.
 //!
@@ -48,7 +52,8 @@ pub use symphonia;
 
 pub use chapters::{ChapterError, ChapterMode};
 pub use convert::{
-    convert, ChapterOut, Conversion, ConversionReport, ConvertError, Input, Progress,
+    convert, convert_pieces, ChapterOut, Conversion, ConversionReport, ConvertError, Input,
+    Progress,
 };
 pub use decode::{
     open_source, AudioSource, Cover, DecodeError, SourceChapter, SourceMetadata, SourceSpec,

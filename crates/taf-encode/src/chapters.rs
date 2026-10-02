@@ -47,4 +47,9 @@ pub enum ChapterError {
     /// There is nothing to convert: the conversion states no inputs at all.
     #[error("no inputs")]
     Empty,
+    /// The chapters stated to begin a piece are no list of cuts: the first of them is the chapter
+    /// the book opens with, which begins the first file and no second one, or they do not
+    /// strictly increase.
+    #[error("piece starts must strictly increase and lie behind the first chapter")]
+    PieceStarts,
 }

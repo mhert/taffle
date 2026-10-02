@@ -36,7 +36,8 @@ use taf::id::AudioId;
 use taf::ogg::{PageView, OPUS_PRE_SKIP};
 use taf::reader::{Summary, Validator};
 use taf_encode::{
-    convert, ChapterMode, Conversion, ConversionReport, ConvertError, Input, Progress, SilenceOpts,
+    convert, convert_pieces, ChapterMode, Conversion, ConversionReport, ConvertError, Input,
+    Progress, SilenceOpts,
 };
 
 /// The rate everything a TAF carries is counted at.
@@ -996,4 +997,242 @@ fn leaving_off_more_than_there_is_leaves_the_file_a_book_with_no_audio_is() {
     assert_eq!(taf.summary.total_samples, FRAME);
     assert_eq!(taf.chapters, [0]);
     assert!(taf.report.duration < FRAME_TIME);
+}
+
+/// What a conversion into pieces hands over: every file there was room for, the progress it
+/// reported, and what it came to.
+type Pieces = (
+    Vec<Vec<u8>>,
+    Vec<Progress>,
+    Result<Vec<ConversionReport>, ConvertError>,
+);
+
+/// Runs a conversion that may write `room` files, and hands over every file it had room for —
+/// the ones it never asked for still empty — with the progress it reported and what it came to.
+fn pieces(inputs: Vec<Input>, opts: &Conversion, starts: &[usize], room: usize) -> Pieces {
+    let mut files: Vec<Cursor<Vec<u8>>> = (0..room).map(|_| Cursor::new(Vec::new())).collect();
+    let mut progress = Vec::new();
+    let reports = {
+        let mut outputs = files
+            .iter_mut()
+            .enumerate()
+            .map(|(at, file)| Ok((AudioId::new(AUDIO_ID.get() + at as u32), file)));
+
+        convert_pieces(inputs, opts, starts, &mut outputs, &mut |event| {
+            progress.push(event);
+
+            std::ops::ControlFlow::Continue(())
+        })
+    };
+
+    (
+        files.into_iter().map(Cursor::into_inner).collect(),
+        progress,
+        reports,
+    )
+}
+
+/// Three inputs of tone, which are three chapters: a half second, a second and a quarter second.
+fn three_inputs() -> Vec<Input> {
+    vec![
+        input(tone_wav(24_000), "one.wav"),
+        input(tone_wav(48_000), "two.wav"),
+        input(tone_wav(12_000), "three.wav"),
+    ]
+}
+
+#[test]
+fn a_book_cut_into_pieces_is_one_file_per_piece_and_each_of_them_holds_up() {
+    let whole = validated(three_inputs(), &Conversion::default());
+    let (files, progress, reports) = pieces(three_inputs(), &Conversion::default(), &[1, 2], 3);
+    let reports = reports.expect("the pieces convert");
+
+    assert_eq!(reports.len(), 3);
+    let mut samples = 0;
+    for (at, (file, report)) in files.iter().zip(&reports).enumerate() {
+        let (summary, chapters) = validate(file);
+        // Every piece is a book of its own: it begins its one chapter where it begins itself.
+        assert_eq!(chapters, [0], "piece {at}");
+        assert_eq!(starts(report), [Duration::ZERO], "piece {at}");
+        assert_eq!(report.audio_id, AudioId::new(AUDIO_ID.get() + at as u32));
+        samples += summary.total_samples;
+    }
+    close(reports[0].duration, plays(24_000), FRAME_TIME);
+    close(reports[1].duration, plays(48_000), FRAME_TIME);
+    close(reports[2].duration, plays(12_000), FRAME_TIME);
+    // A cut costs no audio and adds none: a chapter boundary fills its frame out either way.
+    assert_eq!(samples, whole.summary.total_samples);
+
+    // And the audio encoded so far counts on over every file rather than beginning again at each:
+    // it only grows, and ends at what the three files carry between them — less, at the most, the
+    // frame closing each of them filled in.
+    let encoded: Vec<u64> = progress
+        .iter()
+        .filter_map(|event| match event {
+            Progress::Encoded { samples_done } => Some(*samples_done),
+            _ => None,
+        })
+        .collect();
+    assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
+    let last = *encoded.last().expect("something was encoded");
+    assert!(
+        (last..=last + 3 * FRAME).contains(&samples),
+        "the files carry {samples} where {last} was reported"
+    );
+}
+
+#[test]
+fn a_conversion_of_one_piece_is_the_conversion_it_always_was() {
+    let (whole, _, _) = run(three_inputs(), &Conversion::default());
+    let (files, _, reports) = pieces(three_inputs(), &Conversion::default(), &[], 1);
+
+    assert_eq!(reports.expect("the book converts").len(), 1);
+    assert_eq!(files[0], whole);
+}
+
+#[test]
+fn a_piece_is_cut_at_its_chapter_whatever_the_headers_said() {
+    // Nothing here states where the second chapter of the m4b lies: the cut is at chapter 1, and
+    // chapter 1 is where the audio puts it.
+    let (files, _, reports) = pieces(
+        vec![input(fixtures::TINY_M4B.to_vec(), "tiny.m4b")],
+        &Conversion::default(),
+        &[1],
+        2,
+    );
+    let reports = reports.expect("the pieces convert");
+
+    assert_eq!(reports.len(), 2);
+    assert_eq!(titles(&reports[0]), [Some(fixtures::M4B_FIRST_TITLE)]);
+    assert_eq!(titles(&reports[1]), [Some(fixtures::M4B_SECOND_TITLE)]);
+    assert_eq!(starts(&reports[1]), [Duration::ZERO]);
+    for (file, report) in files.iter().zip(&reports) {
+        validate(file);
+        close(
+            report.duration,
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+        );
+        // The cover is the book's, and every piece of the book carries it.
+        assert_eq!(
+            report.cover.as_ref().map(|cover| cover.bytes.as_slice()),
+            Some(fixtures::COVER_PNG)
+        );
+    }
+}
+
+#[test]
+fn a_piece_whose_chapter_never_begins_is_no_file() {
+    // The input in the middle is nothing but silence, and trimming takes all of it: the chapter
+    // it would have begun begins nothing, so neither does the piece that was to begin there.
+    let (files, _, reports) = pieces(
+        vec![
+            input(tone_wav(48_000), "one.wav"),
+            input(wav(&silence(48_000)), "two.wav"),
+            input(tone_wav(48_000), "three.wav"),
+        ],
+        &Conversion {
+            silence: SilenceOpts {
+                trim_each_chapter: true,
+                ..SilenceOpts::default()
+            },
+            ..Conversion::default()
+        },
+        &[1, 2],
+        3,
+    );
+    let reports = reports.expect("the pieces convert");
+
+    assert_eq!(reports.len(), 2);
+    validate(&files[0]);
+    validate(&files[1]);
+    assert!(
+        files[2].is_empty(),
+        "no file was asked for that nothing went into"
+    );
+}
+
+#[test]
+fn what_is_done_to_the_start_of_the_book_is_done_to_the_first_piece_and_no_other() {
+    let (_, _, reports) = pieces(
+        vec![
+            input(tone_wav(48_000), "one.wav"),
+            input(tone_wav(48_000), "two.wav"),
+        ],
+        &Conversion {
+            silence: SilenceOpts {
+                add_pause_leading: 48_000,
+                ..SilenceOpts::default()
+            },
+            ..Conversion::default()
+        },
+        &[1],
+        2,
+    );
+    let reports = reports.expect("the pieces convert");
+
+    close(reports[0].duration, Duration::from_secs(2), FRAME_TIME);
+    close(reports[1].duration, Duration::from_secs(1), FRAME_TIME);
+}
+
+#[test]
+fn the_end_that_is_left_off_is_the_last_piece_s_and_takes_a_piece_it_is_longer_than() {
+    let leaving_off = |frames| Conversion {
+        skip_trailing: frames,
+        ..Conversion::default()
+    };
+    let inputs = || {
+        vec![
+            input(tone_wav(48_000), "one.wav"),
+            input(tone_wav(48_000), "two.wav"),
+            input(tone_wav(48_000), "three.wav"),
+        ]
+    };
+
+    // Half a second off the end is half a second off the last piece and nothing off the others.
+    let (_, _, reports) = pieces(inputs(), &leaving_off(24_000), &[1, 2], 3);
+    let reports = reports.expect("the pieces convert");
+    assert_eq!(reports.len(), 3);
+    close(reports[1].duration, Duration::from_secs(1), FRAME_TIME);
+    close(reports[2].duration, Duration::from_millis(500), FRAME_TIME);
+
+    // A second and a quarter is the whole last input and a quarter of the one in front of it.
+    let (files, _, reports) = pieces(inputs(), &leaving_off(60_000), &[1, 2], 3);
+    let reports = reports.expect("the pieces convert");
+    assert_eq!(reports.len(), 2);
+    close(reports[1].duration, Duration::from_millis(750), FRAME_TIME);
+    assert!(files[2].is_empty());
+}
+
+#[test]
+fn piece_starts_that_are_no_list_of_cuts_are_refused_before_a_file_is_asked_for() {
+    for starts in [&[0][..], &[2, 1], &[1, 1]] {
+        let (files, _, reports) = pieces(three_inputs(), &Conversion::default(), starts, 3);
+        let refusal = reports.expect_err("no list of cuts");
+
+        assert!(
+            matches!(
+                refusal,
+                ConvertError::Chapters(taf_encode::ChapterError::PieceStarts)
+            ),
+            "{starts:?}: {refusal:?}"
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "piece starts must strictly increase and lie behind the first chapter"
+        );
+        assert!(files.iter().all(Vec::is_empty), "{starts:?}");
+    }
+}
+
+#[test]
+fn a_piece_with_no_file_to_go_into_is_the_output_failing() {
+    let (_, _, reports) = pieces(three_inputs(), &Conversion::default(), &[1], 1);
+    let refusal = reports.expect_err("one file for two pieces");
+
+    assert!(
+        matches!(&refusal, ConvertError::Io(failure)
+            if failure.to_string() == "no output is left for the file being begun"),
+        "{refusal:?}"
+    );
 }

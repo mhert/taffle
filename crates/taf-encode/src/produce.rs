@@ -42,8 +42,14 @@ const CHANNELS: u16 = 2;
 pub(crate) enum Feed {
     /// The conversion has reached this input and is reading it, counted over all inputs.
     Reached(usize),
-    /// A chapter begins in front of the next block, under this title.
-    Chapter(Option<String>),
+    /// A chapter begins in front of the next block, under this title — and a new file with it,
+    /// where it begins a piece.
+    Chapter {
+        /// What the input called the chapter, where anything did.
+        title: Option<String>,
+        /// Whether the chapter begins a piece: a file of its own.
+        piece: bool,
+    },
     /// The next interleaved 48 kHz stereo samples.
     Block(Vec<i16>),
 }
@@ -70,6 +76,10 @@ pub(crate) struct Produced {
 /// holds its own error, so there is nobody left to read anything further and the reading stops with
 /// what it has.
 ///
+/// `piece_starts` are the chapters a piece begins at: indices into the chapter plan, counted over
+/// the whole conversion and in order. The chapter at one of them is handed over as beginning a
+/// piece; every other one is not.
+///
 /// # Errors
 ///
 /// [`ConvertError::Input`] if an input could not be read, decoded, or brought to 48 kHz stereo,
@@ -77,6 +87,7 @@ pub(crate) struct Produced {
 pub(crate) fn produce(
     inputs: Vec<Input>,
     opts: &Conversion,
+    piece_starts: &[usize],
     feed: &SyncSender<Feed>,
 ) -> Result<Produced, ConvertError> {
     let names: Vec<String> = inputs.iter().map(|input| input.name.clone()).collect();
@@ -127,7 +138,11 @@ pub(crate) fn produce(
             let settled = stream.chapters_emitted().len();
             for at in begun..settled {
                 let title = plan.get(at).and_then(|chapter| chapter.title.clone());
-                if !tail.chapter(title) {
+                // A plan is counted from the input its stream begins at: one stream over
+                // everything counts from 0, and a stream per input holds the one chapter that
+                // input is.
+                let piece = piece_starts.binary_search(&(base + at)).is_ok();
+                if !tail.chapter(title, piece) {
                     break 'streams;
                 }
             }
@@ -208,11 +223,12 @@ impl<'a> Tail<'a> {
     }
 
     /// A chapter begins in front of the next block. `false` means nobody is reading any more.
-    fn chapter(&mut self, title: Option<String>) -> bool {
+    fn chapter(&mut self, title: Option<String>, piece: bool) -> bool {
+        let chapter = Feed::Chapter { title, piece };
         if self.hold == 0 {
-            return self.feed.send(Feed::Chapter(title)).is_ok();
+            return self.feed.send(chapter).is_ok();
         }
-        self.pending.push(Feed::Chapter(title));
+        self.pending.push(chapter);
 
         true
     }
@@ -605,9 +621,19 @@ mod tests {
     /// the reading stands at the feed behind the last one taken when the channel is dropped — which
     /// is where a conversion whose encoder refused a frame leaves it.
     fn taken(inputs: Vec<Input>, opts: &Conversion, take: usize) -> (Vec<Feed>, Produced) {
+        taken_in_pieces(inputs, opts, &[], take)
+    }
+
+    /// [`taken`], with the chapters at `piece_starts` beginning a piece each.
+    fn taken_in_pieces(
+        inputs: Vec<Input>,
+        opts: &Conversion,
+        piece_starts: &[usize],
+        take: usize,
+    ) -> (Vec<Feed>, Produced) {
         std::thread::scope(|scope| {
             let (tx, rx) = sync_channel(0);
-            let reading = scope.spawn(move || produce(inputs, opts, &tx));
+            let reading = scope.spawn(move || produce(inputs, opts, piece_starts, &tx));
             let feeds: Vec<Feed> = rx.iter().take(take).collect();
             drop(rx);
 
@@ -619,11 +645,24 @@ mod tests {
     fn named(feed: &Feed) -> String {
         match feed {
             Feed::Reached(at) => format!("reached {at}"),
-            Feed::Chapter(title) => format!("chapter {title:?}"),
+            Feed::Chapter {
+                title,
+                piece: false,
+            } => format!("chapter {title:?}"),
+            Feed::Chapter { title, piece: true } => format!("piece {title:?}"),
             // What is in a block is the sample stage's business; that one came across where it
             // did is this module's.
             Feed::Block(_) => String::from("block"),
         }
+    }
+
+    /// The chapters among `feeds`, in the words [`named`] says them in.
+    fn chapters(feeds: &[Feed]) -> Vec<String> {
+        feeds
+            .iter()
+            .filter(|feed| matches!(feed, Feed::Chapter { .. }))
+            .map(named)
+            .collect()
     }
 
     /// A block of `frames` frames with every sample at `level`, which is what a test finds it by.
@@ -652,7 +691,7 @@ mod tests {
         let (tx, rx) = sync_channel(8);
         let mut tail = Tail::new(&tx, 0);
 
-        assert!(tail.chapter(None));
+        assert!(tail.chapter(None, false));
         assert_eq!(seen(&rx), ["chapter None"]);
         assert!(tail.block(block(4, 1)));
         assert_eq!(seen(&rx), ["4 of 1"]);
@@ -666,7 +705,7 @@ mod tests {
         let mut tail = Tail::new(&tx, 4);
 
         // Four frames are what is left off, so the first four that arrive may be the end.
-        assert!(tail.chapter(None));
+        assert!(tail.chapter(None, false));
         assert!(tail.block(block(4, 1)));
         assert!(seen(&rx).is_empty());
         // With exactly four more behind them they are not, and go on with the chapter they begin.
@@ -686,7 +725,7 @@ mod tests {
         let mut tail = Tail::new(&tx, 4);
 
         assert!(tail.block(block(4, 1)));
-        assert!(tail.chapter(Some(String::from("Two"))));
+        assert!(tail.chapter(Some(String::from("Two")), false));
         assert!(tail.block(block(4, 2)));
         tail.finish();
 
@@ -699,7 +738,7 @@ mod tests {
             let (tx, rx) = sync_channel(8);
             let mut tail = Tail::new(&tx, hold);
 
-            assert!(tail.chapter(None));
+            assert!(tail.chapter(None, false));
             assert!(tail.block(block(4, 1)));
             assert!(tail.block(block(4, 2)));
             tail.finish();
@@ -714,7 +753,7 @@ mod tests {
         drop(rx);
 
         let mut straight = Tail::new(&tx, 0);
-        assert!(!straight.chapter(None));
+        assert!(!straight.chapter(None, false));
         assert!(!straight.block(block(4, 1)));
 
         let mut holding = Tail::new(&tx, 4);
@@ -796,5 +835,34 @@ mod tests {
         let mut concat = Concat::new(Vec::new(), 0, Rc::new(Reading::default()));
 
         assert_eq!(concat.metadata(), SourceMetadata::default());
+    }
+
+    #[test]
+    fn the_input_that_begins_a_piece_says_so_and_no_other_does() {
+        // Several inputs are a chapter each, so the chapter a piece begins at is counted in inputs.
+        let (feeds, _) = taken_in_pieces(
+            vec![sound(FRAMES), sound(FRAMES), sound(FRAMES)],
+            &Conversion::default(),
+            &[1],
+            usize::MAX,
+        );
+
+        assert_eq!(
+            chapters(&feeds),
+            ["chapter None", "piece None", "chapter None"]
+        );
+    }
+
+    #[test]
+    fn a_stated_chapter_that_begins_a_piece_is_counted_with_the_one_the_book_opens_with() {
+        // The plan does not begin at the start of the audio, so the opening chapter is put in
+        // front of it — and is chapter 0, which makes the offset that was typed chapter 1.
+        let stated = Conversion {
+            chapter_mode: ChapterMode::Explicit(vec![24_000]),
+            ..Conversion::default()
+        };
+        let (feeds, _) = taken_in_pieces(vec![sound(FRAMES)], &stated, &[1], usize::MAX);
+
+        assert_eq!(chapters(&feeds), ["chapter None", "piece None"]);
     }
 }
