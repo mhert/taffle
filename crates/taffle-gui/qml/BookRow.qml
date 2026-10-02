@@ -27,11 +27,12 @@ ItemDelegate {
         row.app.revision;
         row.app.bookProgress(row.index)
     }
-    // Why the book stands without the picture it carried, where it does. A line of its own rather
-    // than part of the result, because it is a warning about a book that converted.
-    readonly property string coverNote: {
+    // Whatever is worth saying about a book that converted — a cover that could not be written, a
+    // piece that never began. A line of its own rather than part of the result, because it is a
+    // warning about a book that converted.
+    readonly property string note: {
         row.app.revision;
-        row.app.bookCoverNote(row.index)
+        row.app.bookNote(row.index)
     }
     // A book that has not run is a book to edit again; one that has is a result to read. The queue
     // does not move under a running batch either, so neither does anything on a row.
@@ -121,10 +122,10 @@ ItemDelegate {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             // A cover is a file beside the book and never the book itself, so a cover that could
-            // not be written is a note on a book that converted: amber, and apart from the green
-            // line above saying what the conversion came to.
-            visible: row.coverNote !== ""
-            text: row.coverNote
+            // not be written, or a piece that never began, is a note on a book that converted:
+            // amber, and apart from the green line above saying what the conversion came to.
+            visible: row.note !== ""
+            text: row.note
             color: row.warningColor
         }
     }

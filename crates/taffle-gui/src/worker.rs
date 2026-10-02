@@ -40,21 +40,21 @@ pub enum Event {
 
 /// How a book did not make it, already classified for a row to show.
 ///
-/// Both ways carry whether the file the conversion had begun was still there to take away, because
+/// Both ways carry whether any file the conversion had begun was still there to take away, because
 /// a row that said so where nothing had been written would be reporting something that never
 /// happened — and the commonest failure of all, an input that cannot be opened, is exactly that.
 #[derive(Debug)]
 pub enum BookFailure {
     /// The run was cancelled before or during this book.
     Cancelled {
-        /// Whether a half-written file was found and removed.
+        /// Whether a half-written file was found and removed, of a book in pieces any one of them.
         removed: bool,
     },
     /// The conversion gave up.
     Failed {
         /// The rendered failure chain, every layer on one line — the CLI's own rendering.
         chain: String,
-        /// Whether a half-written file was found and removed.
+        /// Whether a half-written file was found and removed, of a book in pieces any one of them.
         removed: bool,
     },
 }
@@ -79,8 +79,8 @@ type Convert<'a> = &'a dyn Fn(
 /// events over one internal channel and the calling thread drains it through `deliver` — so
 /// delivery is single-threaded and in arrival order, and `deliver` needs no thread-safety of its
 /// own. A raised `cancel` stops running jobs between chunks and keeps waiting ones from starting;
-/// the partial file of a failed or cancelled job is removed best-effort before it is reported, and
-/// what it says of itself states whether there was one to remove. Returns once every job is
+/// the files a failed or cancelled job had written are removed best-effort before it is reported,
+/// and what it says of itself states whether there was any to remove. Returns once every job is
 /// reported and [`Event::BatchDone`] was delivered.
 pub fn run_batch<C, D>(
     jobs: &[taffle::ConvertJob],
@@ -177,16 +177,17 @@ fn convert_one(
     });
 
     let result = outcome.map_err(|error| {
-        // A conversion that failed part-way leaves the file it was writing behind, a cancelled one
-        // included, and half a book is no book. Removing it is best-effort on purpose: what is
-        // reported is how the conversion went, not how the tidying after it went. Whether there
-        // was a file at all is carried out with the failure, because that is what a row needs to
-        // say what became of it — and a conversion that gave up before writing anything left
-        // nothing to say.
-        let removed = job
-            .output
-            .as_ref()
-            .is_some_and(|output| std::fs::remove_file(output).is_ok());
+        // A conversion that failed part-way leaves behind what it had written, a cancelled one
+        // included, and half a book is no book — whichever of its files were already whole.
+        // Removing them is best-effort on purpose: what is reported is how the conversion went,
+        // not how the tidying after it went. Whether there was a file at all is carried out with
+        // the failure, because that is what a row needs to say what became of it. Every file is
+        // tried, whatever the one in front of it came to.
+        let removed = taffle::output_paths(job)
+            .iter()
+            .fold(false, |removed, path| {
+                std::fs::remove_file(path).is_ok() || removed
+            });
 
         classify(&error, removed)
     });
@@ -468,6 +469,46 @@ mod tests {
             failed,
             "the rendered chain and the file that was taken away must reach the row"
         );
+    }
+
+    #[test]
+    fn every_piece_of_a_book_that_failed_is_removed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let output = dir.path().join("book.taf");
+        let pieces = [dir.path().join("book-1.taf"), dir.path().join("book-2.taf")];
+        let (tx, rx) = mpsc::channel();
+        let job = taffle::ConvertJob {
+            piece_starts: vec![1],
+            ..job("a.mp3", output.to_str().expect("utf-8 temp path"))
+        };
+
+        run_batch(
+            &[job],
+            1,
+            &AtomicBool::new(false),
+            |job, _progress| {
+                // The first piece was finished and the second begun when the conversion gave up.
+                for path in taffle::output_paths(&job) {
+                    std::fs::write(path, b"piece").expect("writing a piece");
+                }
+                Err(taffle::JobError::Convert(taffle::ConvertError::Io(
+                    std::io::Error::other("boom"),
+                )))
+            },
+            |event| tx.send(event).unwrap(),
+        );
+
+        assert!(
+            pieces.iter().all(|piece| !piece.exists()),
+            "half a book is no book, whichever half of it was written"
+        );
+        assert!(rx.try_iter().any(|event| matches!(
+            event,
+            Event::Finished {
+                result: Err(BookFailure::Failed { removed: true, .. }),
+                ..
+            }
+        )));
     }
 
     #[test]
