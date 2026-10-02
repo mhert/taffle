@@ -4,6 +4,7 @@
 //! arguments of a conversion sit next to the subcommand rather than under one of their own, and
 //! stating both is refused rather than half-obeyed.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -69,6 +70,14 @@ pub struct ConvertArgs {
     #[arg(long, value_name = "SECONDS", default_value = "0")]
     pub skip_leading: Seconds,
 
+    /// Drop N seconds from the very end (e.g. 12.5)
+    ///
+    /// Taken off behind everything else: the seconds counted are the last of what is written,
+    /// with every trim and every pause already in them. A chapter that would begin in what is
+    /// dropped is no chapter of the file. With --pieces, only the last piece is shorter for it.
+    #[arg(long, value_name = "SECONDS", default_value = "0")]
+    pub skip_trailing: Seconds,
+
     /// Trim leading silence at the start of chapter 1 (applied after --skip-leading)
     #[arg(long)]
     pub trim_pause_leading: bool,
@@ -98,6 +107,17 @@ pub struct ConvertArgs {
     /// one in front of it and inside the audio.
     #[arg(long, value_name = "LIST", value_delimiter = ',')]
     pub chapters: Option<Vec<Seconds>>,
+
+    /// Write the book as N files, cut at chapter starts
+    ///
+    /// The book is split evenly and every cut is moved to the chapter start nearest to it, so no
+    /// chapter is cut in two and the pieces are as long as their chapters make them. They are
+    /// named after the output with their number behind it — book-1.taf, book-2.taf — and each
+    /// has the cover beside it. How long each piece will be is said before the conversion
+    /// starts, from what the files state about themselves. A book with fewer chapters than
+    /// pieces is refused.
+    #[arg(long, value_name = "N", default_value = "1")]
+    pub pieces: NonZeroUsize,
 
     /// Don't extract embedded cover art
     ///

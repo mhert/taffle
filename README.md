@@ -125,6 +125,7 @@ taffle info <FILE.taf>...            # inspect/validate TAF files
 Options (convert):
   -o, --output <PATH>                Output .taf. Default: first input's name + .taf
       --skip-leading <SECONDS>       Drop N seconds from the very start (e.g. 4.4)
+      --skip-trailing <SECONDS>      Drop N seconds from the very end (e.g. 12.5)
       --trim-pause-leading           Trim leading silence at the start of chapter 1
                                      (applied after --skip-leading)
       --trim-pause-each-chapter      Trim leading silence at the start of every
@@ -135,6 +136,7 @@ Options (convert):
                                      Insert silence at the start of every chapter
       --chapters <LIST>              Override chapter marks
                                      ("0:00,12:34,1:02:10.5")
+      --pieces <N>                   Write the book as N files, cut at chapter starts
       --no-cover                     Don't extract embedded cover art
 ```
 
@@ -180,6 +182,36 @@ taffle book.m4b --skip-leading 4.4 --trim-pause-leading --add-pause-leading 1.0
 `--trim-pause-each-chapter` and `--add-pause-each-chapter` do the same for every
 chapter. At chapter 1 the two `--add-` options add up: each of them states what it puts
 in, and neither takes the other's place.
+
+### Splitting a book into pieces
+
+A long book can be written as several files — one per Tonie, say. `--pieces` splits it
+evenly and then moves every cut to the chapter start nearest to it, so no chapter is cut
+in two and the pieces are as long as their chapters make them. What they will be is said
+before the conversion starts, from what the files state about themselves:
+
+```console
+$ taffle book.m4b --pieces 3
+3 pieces:
+  book-1.taf  ~22:50  (chapters 1-6)
+  book-2.taf  ~19:47  (chapters 7-11)
+  book-3.taf  ~21:35  (chapters 12-16)
+wrote book-1.taf (22:50, 6 chapters)
+wrote book-1.jpg
+wrote book-2.taf (19:47, 5 chapters)
+wrote book-2.jpg
+wrote book-3.taf (21:35, 5 chapters)
+wrote book-3.jpg
+```
+
+Each piece is a book of its own: its chapters count from 1, it has its own audio id, and
+the cover is beside it. The chapters are the ones the conversion would have anyway — an
+m4b's own marks, one per file where several are given, or the `--chapters` list — and a
+book with fewer of them than pieces is refused before anything is written.
+
+`--skip-trailing` drops seconds off the very end, the way `--skip-leading` drops them off
+the start. What is done to the start of a book is done to the first piece and what is done
+to its end is done to the last; the per-chapter options reach every chapter of every piece.
 
 ### Reading a TAF back
 

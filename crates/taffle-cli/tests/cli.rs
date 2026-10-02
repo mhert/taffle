@@ -707,3 +707,188 @@ fn the_crate_says_what_it_converts_to_where_a_package_can_read_it() {
         "the crate description does not say what taffle converts to: {description:?}"
     );
 }
+
+#[test]
+fn what_a_run_skips_off_the_end_is_gone_from_the_file() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(3.0));
+    let taf = dir.path().join("book.taf");
+
+    taffle()
+        .arg(&book)
+        .args(["--skip-trailing", "1"])
+        .assert()
+        .success()
+        .stdout(contains(format!(
+            "wrote {} (0:02, 1 chapter)",
+            taf.display()
+        )));
+}
+
+#[test]
+fn a_run_cut_into_pieces_says_them_first_and_writes_one_file_each() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let inputs = [
+        wav(dir.path(), "01.wav", &tone(2.0)),
+        wav(dir.path(), "02.wav", &tone(1.0)),
+        wav(dir.path(), "03.wav", &tone(1.0)),
+    ];
+    let first = dir.path().join("01-1.taf");
+    let second = dir.path().join("01-2.taf");
+
+    taffle()
+        .args(&inputs)
+        .args(["--pieces", "2"])
+        .assert()
+        .success()
+        // The plan, before anything is converted: the names, the lengths the headers state and
+        // the chapters each piece holds.
+        .stderr(
+            contains("2 pieces:")
+                .and(contains(format!(
+                    "  {}  ~0:02  (chapter 1)",
+                    first.display()
+                )))
+                .and(contains(format!(
+                    "  {}  ~0:02  (chapters 2-3)",
+                    second.display()
+                ))),
+        )
+        .stdout(
+            contains(format!("wrote {} (0:02, 1 chapter)", first.display())).and(contains(
+                format!("wrote {} (0:02, 2 chapters)", second.display()),
+            )),
+        );
+
+    assert_eq!(chapters_of(&first), 1);
+    assert_eq!(chapters_of(&second), 2);
+    assert_eq!(
+        listing(dir.path()),
+        ["01-1.taf", "01-2.taf", "01.wav", "02.wav", "03.wav"]
+    );
+}
+
+#[test]
+fn the_pieces_of_a_named_output_are_named_after_it_and_each_gets_the_cover() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = dir.path().join(BOOK);
+    fs::copy(fixture(BOOK), &book).expect("the fixture copies in");
+
+    taffle()
+        .arg(&book)
+        .arg("-o")
+        .arg(dir.path().join("story.taf"))
+        .args(["--pieces", "2"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        listing(dir.path()),
+        [
+            "story-1.png",
+            "story-1.taf",
+            "story-2.png",
+            "story-2.taf",
+            "tiny.m4b"
+        ]
+    );
+}
+
+#[test]
+fn more_pieces_than_chapters_is_refused_before_anything_is_written() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(2.0));
+
+    taffle()
+        .arg(&book)
+        .args(["--pieces", "3"])
+        .assert()
+        .code(1)
+        .stderr(contains("3 pieces asked for, but the book has 1 chapter"));
+
+    assert_eq!(listing(dir.path()), ["book.wav"]);
+}
+
+#[test]
+fn a_file_no_length_can_be_read_off_cannot_be_planned_and_is_named() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let missing = dir.path().join("nowhere.m4b");
+
+    taffle()
+        .arg(&missing)
+        .args(["--pieces", "2"])
+        .assert()
+        .code(1)
+        .stderr(contains(format!(
+            "no length could be read off {}, so the pieces cannot be planned",
+            missing.display()
+        )));
+}
+
+#[test]
+fn a_piece_count_of_nothing_is_a_usage_error() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(0.5));
+
+    for count in ["0", "two"] {
+        taffle()
+            .arg(&book)
+            .args(["--pieces", count])
+            .assert()
+            .code(2)
+            .stderr(contains("--pieces"));
+    }
+}
+
+#[test]
+fn one_piece_is_the_file_a_run_always_wrote() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(1.0));
+
+    taffle()
+        .arg(&book)
+        .args(["--pieces", "1"])
+        .assert()
+        .success()
+        .stderr(contains("pieces:").not());
+
+    assert_eq!(listing(dir.path()), ["book.taf", "book.wav"]);
+}
+
+#[test]
+fn a_piece_that_never_began_is_a_warning_and_no_file() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let inputs = [
+        wav(dir.path(), "01.wav", &tone(2.0)),
+        // Nothing but silence, which trimming every chapter takes whole: the chapter this file
+        // was to be never begins, and neither does the piece that was to begin there.
+        wav(dir.path(), "02.wav", &silence(2.0)),
+    ];
+
+    taffle()
+        .args(&inputs)
+        .args(["--pieces", "2", "--trim-pause-each-chapter"])
+        .assert()
+        .success()
+        .stderr(contains(
+            "warning: only 1 of the 2 pieces planned were written: a chapter that was to begin one never began",
+        ));
+
+    assert_eq!(listing(dir.path()), ["01-1.taf", "01.wav", "02.wav"]);
+}
+
+#[test]
+fn a_piece_holding_more_chapters_than_a_box_plays_is_warned_about_from_the_plan() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(30.0));
+
+    // 300 chapters a tenth of a second apart over thirty seconds, cut at the fifteenth second
+    // into two pieces of 150: each over what a box plays, and each said from the plan. The 300
+    // the book holds altogether are no file's, and nothing is said about them.
+    taffle()
+        .arg(&book)
+        .args(["--chapters", &offsets(0, 300), "--pieces", "2"])
+        .assert()
+        .success()
+        .stderr(contains(over_limit(150)).and(contains(over_limit(300)).not()));
+}
