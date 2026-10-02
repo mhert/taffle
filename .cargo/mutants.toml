@@ -30,4 +30,8 @@ exclude_re = [
     'produce\.rs:.*replace <impl AudioSource for Concat>::next_block -> Result<Option<Vec<i16>>, DecodeError> with Ok\(Some\(vec!\[\]\)\)',
     # A turn that resamples nothing never drains the pending frames the push loop waits on.
     'pcm/resample\.rs:.*replace Resampler48::turn -> Result<\(\), PcmError> with Ok\(\(\)\)',
+    # An endless supply of one-sample blocks: as with the empty ones above, the conversion never ends.
+    'produce\.rs:.*replace <impl AudioSource for Concat>::next_block -> Result<Option<Vec<i16>>, DecodeError> with Ok\(Some\(vec!\[-?[01]\]\)\)',
+    # A `clear` that always hands a block back is a `while let Some(..) = self.clear()` that never stops.
+    'produce\.rs:.*replace Tail<.a>::clear -> Option<\(Vec<Feed>, Vec<i16>\)> with Some\(\(vec!\[\], vec!\[(-?[01])?\]\)\)',
 ]
