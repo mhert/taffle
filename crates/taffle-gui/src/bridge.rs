@@ -56,6 +56,7 @@ pub mod qobject {
         #[qproperty(i32, book_count, cxx_name = "bookCount")]
         #[qproperty(QString, panel_error, cxx_name = "panelError")]
         #[qproperty(QString, chapter_warning, cxx_name = "chapterWarning")]
+        #[qproperty(QString, pieces_preview, cxx_name = "piecesPreview")]
         #[qproperty(bool, smoke_mode, cxx_name = "smokeMode")]
         /// The QML-facing application object.
         type TaffleApp = super::TaffleAppRust;
@@ -100,6 +101,16 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "setSkipLeading"]
         fn set_skip_leading(self: Pin<&mut Self>, text: &QString);
+
+        /// How much is dropped from the very end.
+        #[qinvokable]
+        #[cxx_name = "setSkipTrailing"]
+        fn set_skip_trailing(self: Pin<&mut Self>, text: &QString);
+
+        /// How many files the book is written as.
+        #[qinvokable]
+        #[cxx_name = "setPieces"]
+        fn set_pieces(self: Pin<&mut Self>, text: &QString);
 
         /// Whether the silence the first chapter begins with is dropped.
         #[qinvokable]
@@ -146,6 +157,16 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "skipLeadingText"]
         fn skip_leading_text(self: &Self) -> QString;
+
+        /// What the skip-trailing field holds.
+        #[qinvokable]
+        #[cxx_name = "skipTrailingText"]
+        fn skip_trailing_text(self: &Self) -> QString;
+
+        /// What the pieces field holds.
+        #[qinvokable]
+        #[cxx_name = "piecesText"]
+        fn pieces_text(self: &Self) -> QString;
 
         /// Whether the leading silence is dropped.
         #[qinvokable]
@@ -218,12 +239,13 @@ pub mod qobject {
         #[cxx_name = "bookResult"]
         fn book_result(self: &Self, index: i32) -> QString;
 
-        /// Why the book at `index` stands without the picture it carried, and nothing at all
-        /// where it does not stand without one. A note beside a book that converted, never a
-        /// failure of it — which is why the row shows it apart from what the book came to.
+        /// What is worth saying about the book at `index` that converted — a cover that could not
+        /// be written, a piece that never began — and nothing at all where there is nothing. A
+        /// note beside a book that converted, never a failure of it — which is why the row shows
+        /// it in amber, apart from what the book came to.
         #[qinvokable]
-        #[cxx_name = "bookCoverNote"]
-        fn book_cover_note(self: &Self, index: i32) -> QString;
+        #[cxx_name = "bookNote"]
+        fn book_note(self: &Self, index: i32) -> QString;
 
         /// Converts every book that is waiting, the one being edited included; `false` where no
         /// batch was started.
@@ -266,11 +288,11 @@ impl qobject::TaffleApp {
             .collect();
         // Each file is asked how long it plays as it lands, so a row states the length of what is
         // about to be converted before any of it has been.
-        let lengths = probed(&added);
+        let layouts = probed(&added);
         {
             let mut rust = self.as_mut().rust_mut();
             rust.panel.files.extend(added);
-            rust.panel_durations.extend(lengths);
+            rust.panel_layouts.extend(layouts);
         }
         self.as_mut().refresh();
     }
@@ -285,7 +307,7 @@ impl qobject::TaffleApp {
             rust.panel.files.remove(at);
             // The lengths are index-aligned with the files, so the check above is the check for
             // both and one leaves with the other.
-            rust.panel_durations.remove(at);
+            rust.panel_layouts.remove(at);
         }
         self.as_mut().refresh();
     }
@@ -304,8 +326,8 @@ impl qobject::TaffleApp {
             let moved = rust.panel.files.remove(from);
             rust.panel.files.insert(to, moved);
             // Both rows were in range, so taking one out leaves the other one still in range.
-            let length = rust.panel_durations.remove(from);
-            rust.panel_durations.insert(to, length);
+            let layout = rust.panel_layouts.remove(from);
+            rust.panel_layouts.insert(to, layout);
         }
         self.as_mut().refresh();
 
@@ -338,6 +360,18 @@ impl qobject::TaffleApp {
     /// How much is dropped from the very start.
     pub fn set_skip_leading(mut self: Pin<&mut Self>, text: &QString) {
         self.as_mut().rust_mut().panel.skip_leading_text = text.to_string();
+        self.as_mut().refresh();
+    }
+
+    /// How much is dropped from the very end.
+    pub fn set_skip_trailing(mut self: Pin<&mut Self>, text: &QString) {
+        self.as_mut().rust_mut().panel.skip_trailing_text = text.to_string();
+        self.as_mut().refresh();
+    }
+
+    /// How many files the book is written as.
+    pub fn set_pieces(mut self: Pin<&mut Self>, text: &QString) {
+        self.as_mut().rust_mut().panel.pieces_text = text.to_string();
         self.as_mut().refresh();
     }
 
@@ -395,6 +429,16 @@ impl qobject::TaffleApp {
         QString::from(self.rust().panel.skip_leading_text.as_str())
     }
 
+    /// What the skip-trailing field holds.
+    pub fn skip_trailing_text(&self) -> QString {
+        QString::from(self.rust().panel.skip_trailing_text.as_str())
+    }
+
+    /// What the pieces field holds.
+    pub fn pieces_text(&self) -> QString {
+        QString::from(self.rust().panel.pieces_text.as_str())
+    }
+
     /// Whether the leading silence is dropped.
     pub fn trim_leading(&self) -> bool {
         self.rust().panel.trim_leading
@@ -422,7 +466,7 @@ impl qobject::TaffleApp {
 
     /// Queues the book being edited and leaves a fresh panel behind.
     pub fn add_to_batch(mut self: Pin<&mut Self>) -> bool {
-        let plan = match plan::capture(&self.rust().panel) {
+        let plan = match plan::capture(&self.rust().panel, &self.rust().panel_layouts) {
             Ok(plan) => plan,
             Err(error) => {
                 self.as_mut().refuse(&error.to_string());
@@ -447,7 +491,7 @@ impl qobject::TaffleApp {
             return false;
         }
 
-        let probed = stated_length(&self.rust().panel_durations);
+        let probed = stated_length(&self.rust().panel_layouts);
         {
             let mut rust = self.as_mut().rust_mut();
             rust.books.push(Book {
@@ -458,7 +502,7 @@ impl qobject::TaffleApp {
             // What is left behind is a panel at its own defaults, the cover switch included —
             // adding a book starts the next one rather than leaving the last one's settings on.
             rust.panel = plan::Panel::default();
-            rust.panel_durations.clear();
+            rust.panel_layouts.clear();
         }
         self.as_mut().refresh();
 
@@ -502,11 +546,11 @@ impl qobject::TaffleApp {
         let panel = self.as_mut().rust_mut().books.remove(at).plan.panel;
         // Only the sum of the files' lengths was kept with the book, and it is the per-file
         // lengths a panel needs, so they are read off the files again.
-        let lengths = probed(&panel.files);
+        let layouts = probed(&panel.files);
         {
             let mut rust = self.as_mut().rust_mut();
             rust.panel = panel;
-            rust.panel_durations = lengths;
+            rust.panel_layouts = layouts;
         }
         self.as_mut().refresh();
     }
@@ -551,9 +595,9 @@ impl qobject::TaffleApp {
         self.about(index, Book::result)
     }
 
-    /// Why the book at `index` stands without the picture it carried.
-    pub fn book_cover_note(&self, index: i32) -> QString {
-        self.about(index, Book::cover_note)
+    /// What is worth saying about the book at `index` that converted.
+    pub fn book_note(&self, index: i32) -> QString {
+        self.about(index, Book::note)
     }
 
     /// Converts every book that is waiting, the one being edited included.
@@ -640,7 +684,7 @@ impl qobject::TaffleApp {
             let mut rust = self.as_mut().rust_mut();
             rust.books.clear();
             rust.panel = plan::Panel::default();
-            rust.panel_durations.clear();
+            rust.panel_layouts.clear();
         }
         self.as_mut().refresh();
     }
@@ -759,7 +803,7 @@ impl qobject::TaffleApp {
                 .files
                 .push(drill_path(&format!("{STEM}-next"), "m4b"));
             // The lengths are index-aligned with the files, and nothing was probed.
-            rust.panel_durations.push(None);
+            rust.panel_layouts.push(None);
         }
         self.as_mut().refresh();
     }
@@ -779,17 +823,29 @@ impl qobject::TaffleApp {
     /// Recomputes everything QML reads off the panel and the queue, and bumps the revision the
     /// delegates re-read on.
     fn refresh(mut self: Pin<&mut Self>) {
-        let (files, books, error, warning) = {
+        let (files, books, error, warning, preview) = {
             let rust = self.rust();
-            let (error, warning) = match plan::capture(&rust.panel) {
+            let (error, warning, preview) = match plan::capture(&rust.panel, &rust.panel_layouts) {
                 // A panel nobody has put a file in yet is not a mistake, it is a panel being
                 // filled in — so nothing is said about it here. Having nothing to convert is the
                 // answer where a book is added, and that is where it is said.
-                Err(plan::CaptureError::NoFiles) => (String::new(), String::new()),
-                Err(error) => (error.to_string(), String::new()),
+                Err(plan::CaptureError::NoFiles) => Default::default(),
+                Err(error) => (error.to_string(), String::new(), String::new()),
                 Ok(plan) => (
                     String::new(),
-                    plan::chapter_warning(&plan.job.options.chapter_mode).unwrap_or_default(),
+                    // A box counts the chapters of a file, so a book cut into pieces is counted
+                    // piece by piece.
+                    plan.pieces
+                        .as_ref()
+                        .map_or_else(
+                            || plan::chapter_warning(&plan.job.options.chapter_mode),
+                            plan::piece_warning,
+                        )
+                        .unwrap_or_default(),
+                    plan.pieces
+                        .as_ref()
+                        .map(plan::pieces_preview)
+                        .unwrap_or_default(),
                 ),
             };
 
@@ -798,6 +854,7 @@ impl qobject::TaffleApp {
                 counted(rust.books.len()),
                 error,
                 warning,
+                preview,
             )
         };
         self.as_mut().set_file_count(files);
@@ -805,6 +862,8 @@ impl qobject::TaffleApp {
         self.as_mut().set_panel_error(QString::from(error.as_str()));
         self.as_mut()
             .set_chapter_warning(QString::from(warning.as_str()));
+        self.as_mut()
+            .set_pieces_preview(QString::from(preview.as_str()));
         // What a delegate reads the revision for is that it is not what it was, so a bump that
         // wrapped is still a bump — and it is one number rather than an arithmetic overflow.
         let bumped = self.as_ref().revision().wrapping_add(1);
@@ -849,11 +908,14 @@ pub struct TaffleAppRust {
     panel_error: QString,
     /// That the chapter plan is longer than a box plays, or nothing at all. Not a refusal.
     chapter_warning: QString,
+    /// How long each piece of the book being edited is stated to play, or nothing where it is one
+    /// file.
+    pieces_preview: QString,
     /// The book being edited, as it is typed.
     panel: plan::Panel,
-    /// Probed length per panel file, index-aligned; a probe that failed is None and the book
-    /// shows no length (and a stripe, not a percent).
-    panel_durations: Vec<Option<Duration>>,
+    /// What each panel file states about itself, index-aligned. A file that states nothing is
+    /// None, and the book shows no length (a stripe, not a percent) and can be cut into no pieces.
+    panel_layouts: Vec<Option<taffle::Layout>>,
     /// The queue, in the order it was added to.
     books: Vec<Book>,
     /// Which book each job of the running batch belongs to, by its place in the queue: a batch is
@@ -876,8 +938,9 @@ impl Default for TaffleAppRust {
             book_count: 0,
             panel_error: QString::default(),
             chapter_warning: QString::default(),
+            pieces_preview: QString::default(),
             panel: plan::Panel::default(),
-            panel_durations: Vec::new(),
+            panel_layouts: Vec::new(),
             books: Vec::new(),
             batch: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -895,23 +958,24 @@ impl TaffleAppRust {
     /// and a job number that names no row is a batch nobody is showing any more, which is nothing
     /// to do rather than something to report.
     fn adopt(&mut self, event: worker::Event) {
-        let (job, state) = match event {
-            worker::Event::Started { index } => (index, BookState::Converting { samples_done: 0 }),
-            worker::Event::Progress {
-                index,
-                samples_done,
-            } => (index, BookState::Converting { samples_done }),
-            worker::Event::Finished { index, result } => (index, finished(result)),
+        let job = match &event {
+            worker::Event::Started { index }
+            | worker::Event::Progress { index, .. }
+            | worker::Event::Finished { index, .. } => *index,
             // The run's own last word, which is the caller's: see `qobject::TaffleApp::apply`.
             worker::Event::BatchDone => return,
         };
-
-        let Some(&at) = self.batch.get(job) else {
+        // What a finished job is held against is the plan of its own book, so the row is looked
+        // up before the word is read.
+        let Some(book) = self.batch.get(job).and_then(|at| self.books.get_mut(*at)) else {
             return;
         };
-        if let Some(book) = self.books.get_mut(at) {
-            book.state = state;
-        }
+
+        book.state = match event {
+            worker::Event::Progress { samples_done, .. } => BookState::Converting { samples_done },
+            worker::Event::Finished { result, .. } => finished(result, book.pieces()),
+            _ => BookState::Converting { samples_done: 0 },
+        };
     }
 
     /// Where the books that are still waiting sit in the queue, in the order they will run.
@@ -945,8 +1009,14 @@ struct Book {
 }
 
 impl Book {
-    /// What the row says under the title: how many files the book holds, and how long they state
-    /// they play where they state it at all.
+    /// How many files the book is written as.
+    fn pieces(&self) -> usize {
+        self.plan.job.piece_starts.len() + 1
+    }
+
+    /// What the row says under the title: how many files the book holds, how long they state
+    /// they play where they state it at all, and how many pieces it is written as where that is
+    /// more than one.
     fn meta(&self) -> String {
         let files = self.plan.job.inputs.len();
         let held = if files == 1 {
@@ -955,10 +1025,13 @@ impl Book {
             format!("{files} files")
         };
 
-        match self.probed {
-            Some(length) => format!("{held} · {}", clock(length)),
-            None => held,
+        let mut said = vec![held];
+        said.extend(self.probed.map(clock));
+        if self.pieces() > 1 {
+            said.push(format!("{} pieces", self.pieces()));
         }
+
+        said.join(" · ")
     }
 
     /// What the row says the book is doing or came to, and nothing at all for one that has not
@@ -975,16 +1048,17 @@ impl Book {
             BookState::Done { result_line, .. } => result_line.clone(),
             BookState::Failed { message } => message.clone(),
             BookState::Cancelled { removed } => {
-                removed_note("the conversion was stopped", *removed)
+                removed_note("the conversion was stopped", *removed, self.pieces())
             }
         }
     }
 
-    /// Why the book stands without the picture it carried, and nothing at all for a book that
-    /// stands with one — or that never got as far as looking.
-    fn cover_note(&self) -> String {
+    /// What is worth saying about the book that converted — a cover that could not be written, a
+    /// piece that never began — and nothing at all for a book with nothing to say, or one that
+    /// never got as far as converting.
+    fn note(&self) -> String {
         match &self.state {
-            BookState::Done { cover_note, .. } => cover_note.clone(),
+            BookState::Done { note, .. } => note.clone(),
             _ => String::new(),
         }
     }
@@ -1024,10 +1098,11 @@ enum BookState {
     Done {
         /// What was written, how long it plays and how many chapters it holds.
         result_line: String,
-        /// Why the book stands without the picture it carried, or nothing at all. Held apart from
-        /// the line above because the row shows it in amber: it is a warning about a book that
-        /// converted, not part of what converting came to.
-        cover_note: String,
+        /// What is worth saying about a book that converted — a cover that could not be written,
+        /// a piece that never began — or nothing at all. Held apart from the line above because
+        /// the row shows it in amber: it is a warning about a book that converted, not part of
+        /// what converting came to.
+        note: String,
     },
     /// Did not convert.
     Failed {
@@ -1065,15 +1140,19 @@ impl BookState {
     }
 }
 
-/// What a job that is over leaves its row in.
-fn finished(result: Result<Vec<taffle::JobOutcome>, worker::BookFailure>) -> BookState {
+/// What a job that is over leaves its row in, where `planned` is how many files its book was to be
+/// written as.
+fn finished(
+    result: Result<Vec<taffle::JobOutcome>, worker::BookFailure>,
+    planned: usize,
+) -> BookState {
     match result {
         Ok(outcomes) => BookState::Done {
             result_line: report_line(&outcomes),
-            cover_note: cover_note(&outcomes),
+            note: note(&outcomes, planned),
         },
         Err(worker::BookFailure::Failed { chain, removed }) => BookState::Failed {
-            message: removed_note(&chain, removed),
+            message: removed_note(&chain, removed, planned),
         },
         // Being stopped is the one failure somebody asked for, and the row says so rather than
         // rendering a chain nobody needs to read.
@@ -1085,7 +1164,7 @@ fn finished(result: Result<Vec<taffle::JobOutcome>, worker::BookFailure>) -> Boo
 /// where one was written.
 ///
 /// The cover is a file beside the file, so it is a line of its own the way the command line writes
-/// it. A cover that could *not* be written is no part of this: it is [`cover_note`], because it is
+/// it. A cover that could *not* be written is no part of this: it is [`note`], because it is
 /// a warning about a book that converted and this is what converting came to.
 fn report_line(outcomes: &[taffle::JobOutcome]) -> String {
     let lines: Vec<String> = outcomes
@@ -1110,20 +1189,28 @@ fn report_line(outcomes: &[taffle::JobOutcome]) -> String {
     lines.join("\n")
 }
 
-/// Why the book stands without the picture it carried, and nothing at all where it does not stand
-/// without one.
+/// What is worth saying about a book that converted — a cover that could not be written, a piece
+/// that never began — and nothing at all where there is nothing to say.
 ///
 /// Kept apart from [`report_line`] so that the row can show it in the amber a warning is shown in:
 /// the book converted, and what a row says about a conversion that went through is green. A cover
 /// is a file beside the book and never the book itself, so a cover nothing could be made of is a
-/// note and never a failure.
-fn cover_note(outcomes: &[taffle::JobOutcome]) -> String {
-    outcomes
+/// note and never a failure. `planned` is how many files the book was to be written as.
+fn note(outcomes: &[taffle::JobOutcome], planned: usize) -> String {
+    let mut lines: Vec<String> = outcomes
         .iter()
         .filter_map(|outcome| outcome.cover_error.as_ref())
         .map(|why| format!("no cover was written: {why}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    // A cut is made where its chapter begins, and a chapter with no audio left begins nowhere.
+    if outcomes.len() < planned {
+        lines.push(format!(
+            "only {} of the {planned} pieces planned were written: a chapter that was to begin one never began",
+            outcomes.len()
+        ));
+    }
+
+    lines.join("\n")
 }
 
 /// `reason`, and — where `removed` says there was a file to take away — that it is gone: the batch
@@ -1132,11 +1219,12 @@ fn cover_note(outcomes: &[taffle::JobOutcome]) -> String {
 ///
 /// A conversion that gave up before writing anything says only why. The note is about a file, and
 /// a row claiming one was removed where none was ever written states something that did not happen.
-fn removed_note(reason: &str, removed: bool) -> String {
-    if removed {
-        format!("{reason}; the unfinished file was removed")
-    } else {
-        reason.to_owned()
+/// A book written as more than one of `pieces` says the files, since any of them may have been.
+fn removed_note(reason: &str, removed: bool, pieces: usize) -> String {
+    match (removed, pieces > 1) {
+        (false, _) => reason.to_owned(),
+        (true, false) => format!("{reason}; the unfinished file was removed"),
+        (true, true) => format!("{reason}; the files it had written were removed"),
     }
 }
 
@@ -1169,6 +1257,7 @@ fn drill_book(stem: &str) -> Book {
                 piece_starts: Vec::new(),
             },
             panel,
+            pieces: None,
         },
         probed: Some(STATED),
         state: BookState::Ready,
@@ -1181,15 +1270,15 @@ fn drill_path(stem: &str, extension: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{stem}.{extension}"))
 }
 
-/// How long each of `files` states it plays, index-aligned with them.
+/// What each of `files` states about itself, index-aligned with them.
 ///
-/// Every way a probe can come to nothing — a file that cannot be read, a container this build does
-/// not know, one that states no length — is the same answer to a row: no stated length. So none of
-/// them is told apart here.
-fn probed(files: &[PathBuf]) -> Vec<Option<Duration>> {
+/// Every way a file can state nothing — one that cannot be read, a container this build does not
+/// know, one that states no length — is the same answer to a row and to a plan of pieces: nothing
+/// to count against. So none of them is told apart here.
+fn probed(files: &[PathBuf]) -> Vec<Option<taffle::Layout>> {
     files
         .iter()
-        .map(|path| taffle::probe_duration(path).ok())
+        .map(|path| taffle::probe_layout(path).ok())
         .collect()
 }
 
@@ -1198,8 +1287,15 @@ fn probed(files: &[PathBuf]) -> Vec<Option<Duration>> {
 ///
 /// A sum that is missing a file is not the length of the book, and a row showing it would state a
 /// length that is wrong — with a percent counted against it that is wrong by the same amount.
-fn stated_length(lengths: &[Option<Duration>]) -> Option<Duration> {
-    lengths.iter().copied().sum()
+fn stated_length(layouts: &[Option<taffle::Layout>]) -> Option<Duration> {
+    let rate = u64::from(RATE);
+    let frames = layouts
+        .iter()
+        .map(|layout| layout.as_ref().map(|layout| layout.frames))
+        .sum::<Option<u64>>()?;
+    let nanos = u32::try_from((frames % rate) * 1_000_000_000 / rate).unwrap_or(0);
+
+    Some(Duration::new(frames / rate, nanos))
 }
 
 /// What a refused set of conversions reads as beside a queue of titles: what the check said,
@@ -1290,7 +1386,7 @@ mod tests {
             ..Panel::default()
         };
         Book {
-            plan: capture(&panel).expect("a plan"),
+            plan: capture(&panel, &[]).expect("a plan"),
             probed,
             state: BookState::Ready,
         }
@@ -1336,7 +1432,7 @@ mod tests {
         let mut converted = book(&["a.mp3"], None);
         converted.state = BookState::Done {
             result_line: "wrote a.taf (0:30, 1 chapter)".to_owned(),
-            cover_note: String::new(),
+            note: String::new(),
         };
         // A book that has already converted stays in the queue, so the one job of this batch is
         // the second row — which is the whole reason a job's index is looked up and not used.
@@ -1393,7 +1489,7 @@ mod tests {
 
         // A book that converted says so, and has nothing to say about a cover it wrote no note
         // about.
-        assert_eq!(row(&with_cover, 0).cover_note(), "");
+        assert_eq!(row(&with_cover, 0).note(), "");
     }
 
     #[test]
@@ -1414,7 +1510,7 @@ mod tests {
             "wrote out/book.taf (0:30, 1 chapter)"
         );
         assert_eq!(
-            row(&without_cover, 0).cover_note(),
+            row(&without_cover, 0).note(),
             "no cover was written: the picture is a WEBP, which nothing here writes"
         );
     }
@@ -1532,16 +1628,104 @@ mod tests {
         assert_eq!(book(&["a.mp3", "b.mp3"], None).meta(), "2 files");
     }
 
+    /// A queued book of one file, cut where `piece_starts` says.
+    fn cut_book(piece_starts: &[usize]) -> Book {
+        let mut book = book(&["a.m4b"], Some(Duration::from_secs(600)));
+        book.plan.job.piece_starts = piece_starts.to_vec();
+
+        book
+    }
+
     #[test]
-    fn a_book_states_a_length_only_where_every_one_of_its_files_does() {
-        let ten = Some(Duration::from_secs(10));
+    fn a_row_says_how_many_pieces_its_book_is_written_as() {
+        assert_eq!(cut_book(&[]).meta(), "1 file · 10:00");
+        assert_eq!(cut_book(&[3, 7]).meta(), "1 file · 10:00 · 3 pieces");
+    }
+
+    #[test]
+    fn a_book_written_as_pieces_says_every_file_it_wrote() {
+        let mut app = app(vec![cut_book(&[1])], vec![0]);
+        let second = taffle::JobOutcome {
+            taf_path: PathBuf::from("out/book-2.taf"),
+            ..outcome(2, Duration::from_secs(30))
+        };
+
+        app.adopt(Event::Finished {
+            index: 0,
+            result: Ok(vec![outcome(1, Duration::from_secs(60)), second]),
+        });
+
         assert_eq!(
-            stated_length(&[ten, Some(Duration::from_secs(20))]),
-            Some(Duration::from_secs(30))
+            row(&app, 0).result(),
+            "wrote out/book.taf (1:00, 1 chapter)\nwrote out/book-2.taf (0:30, 2 chapters)"
         );
-        // A sum that is missing a file is not how long the book plays, and a row showing it would
-        // be stating a length that is wrong.
-        assert_eq!(stated_length(&[ten, None]), None);
+        assert_eq!(row(&app, 0).note(), "");
+    }
+
+    #[test]
+    fn fewer_pieces_than_planned_is_a_note_on_a_book_that_converted() {
+        let mut app = app(vec![cut_book(&[1, 2])], vec![0]);
+
+        app.adopt(Event::Finished {
+            index: 0,
+            result: Ok(vec![
+                outcome(1, Duration::from_secs(60)),
+                outcome(1, Duration::from_secs(60)),
+            ]),
+        });
+
+        assert_eq!(row(&app, 0).state.name(), "done");
+        assert_eq!(
+            row(&app, 0).note(),
+            "only 2 of the 3 pieces planned were written: a chapter that was to begin one never began"
+        );
+    }
+
+    #[test]
+    fn a_book_of_pieces_that_failed_says_its_files_are_gone() {
+        let mut app = app(vec![cut_book(&[1]), cut_book(&[])], vec![0, 1]);
+        let failed = |index| Event::Finished {
+            index,
+            result: Err(BookFailure::Failed {
+                chain: "boom".to_owned(),
+                removed: true,
+            }),
+        };
+
+        app.adopt(failed(0));
+        app.adopt(failed(1));
+
+        assert_eq!(
+            row(&app, 0).result(),
+            "boom; the files it had written were removed"
+        );
+        assert_eq!(
+            row(&app, 1).result(),
+            "boom; the unfinished file was removed"
+        );
+    }
+
+    #[test]
+    fn a_book_states_a_length_only_where_every_one_of_its_files_states_a_layout() {
+        let stating = |seconds: u64| {
+            Some(taffle::Layout {
+                frames: seconds * 48_000,
+                marks: Vec::new(),
+            })
+        };
+
+        assert_eq!(
+            stated_length(&[stating(60), stating(30)]),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(stated_length(&[stating(60), None]), None);
+        assert_eq!(
+            stated_length(&[Some(taffle::Layout {
+                frames: 72_000,
+                marks: Vec::new()
+            })]),
+            Some(Duration::from_millis(1_500))
+        );
     }
 
     #[test]
@@ -1574,7 +1758,7 @@ mod tests {
             output_text: "a/01.mp3".to_owned(),
             ..Panel::default()
         };
-        let plan = capture(&over_itself).expect("a plan");
+        let plan = capture(&over_itself, &[]).expect("a plan");
         let error =
             taffle::refuse_collisions(std::slice::from_ref(&plan.job)).expect_err("a collision");
 

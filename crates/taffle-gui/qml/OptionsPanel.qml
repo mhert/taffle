@@ -104,6 +104,20 @@ ColumnLayout {
 
     Label {
         Layout.topMargin: panel.groupSpacing
+        text: qsTr("Skip trailing")
+    }
+    TextField {
+        Layout.fillWidth: true
+        placeholderText: qsTr("seconds")
+        text: {
+            panel.app.revision;
+            panel.app.skipTrailingText()
+        }
+        onTextEdited: panel.app.setSkipTrailing(text)
+    }
+
+    Label {
+        Layout.topMargin: panel.groupSpacing
         text: qsTr("Add pause leading")
     }
     TextField {
@@ -128,6 +142,31 @@ ColumnLayout {
             panel.app.addPauseEachText()
         }
         onTextEdited: panel.app.setAddPauseEach(text)
+    }
+
+    Label {
+        Layout.topMargin: panel.groupSpacing
+        text: qsTr("Pieces")
+    }
+    TextField {
+        Layout.fillWidth: true
+        // Nothing typed is the book in one file, which is what the field stands empty for.
+        placeholderText: "1"
+        text: {
+            panel.app.revision;
+            panel.app.piecesText()
+        }
+        onTextEdited: panel.app.setPieces(text)
+    }
+    Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        // How long each piece is stated to play, read off the files before any of them is
+        // converted: an estimate, which is what the sign it begins with says. A book that cannot
+        // be cut says why where every other refusal of the panel is said.
+        visible: panel.app.piecesPreview !== ""
+        opacity: 0.7
+        text: panel.app.piecesPreview
     }
 
     CheckBox {
