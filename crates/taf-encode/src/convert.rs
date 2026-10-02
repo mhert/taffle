@@ -371,7 +371,8 @@ pub fn convert<W: Write + Seek>(
 /// or it lies in what [`Conversion::skip_trailing`] leaves off — and a cut may find no audio on
 /// one side of it, at the start of a file that holds nothing yet or in front of a chapter that
 /// brings nothing of its own. Either way the cut is not made: the chapter stays in the file in
-/// front, no output is asked for, and fewer reports come back than cuts were stated.
+/// front, no output is asked for, and one report fewer comes back for every cut that is not made
+/// — fewer than the pieces that were stated.
 ///
 /// # Errors
 ///
