@@ -25,6 +25,7 @@
 //! a second set of them.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::mpsc::SyncSender;
 use std::vec::IntoIter;
@@ -89,6 +90,7 @@ pub(crate) fn produce(
 
     let mut opening_title = None;
     let mut reported = 0;
+    let mut tail = Tail::new(feed, opts.skip_trailing);
     let streams = streamed(inputs, &opts.chapter_mode);
     let per_input = streams.len() > 1;
 
@@ -125,13 +127,13 @@ pub(crate) fn produce(
             let settled = stream.chapters_emitted().len();
             for at in begun..settled {
                 let title = plan.get(at).and_then(|chapter| chapter.title.clone());
-                if feed.send(Feed::Chapter(title)).is_err() {
+                if !tail.chapter(title) {
                     break 'streams;
                 }
             }
             begun = settled;
 
-            if feed.send(Feed::Block(block)).is_err() {
+            if !tail.block(block) {
                 break 'streams;
             }
         }
@@ -141,6 +143,9 @@ pub(crate) fn produce(
             break 'streams;
         }
     }
+
+    // The inputs have run out, which is what makes the audio still held the end of it.
+    tail.finish();
 
     Ok(Produced {
         frames: reading.frames.get(),
@@ -165,6 +170,107 @@ fn reach(reading: &Reading, reported: &mut usize, feed: &SyncSender<Feed>) -> bo
     *reported = at.saturating_add(1);
 
     true
+}
+
+/// The sending end of the reading, with the end of the audio held back.
+///
+/// What a conversion leaves off the end is not known to be the end until the inputs have run out.
+/// So as many frames as it was asked to leave off are kept here, each block with the chapters
+/// that begin at it, and a block is handed on only once that many frames stand behind it. What is
+/// still held when the inputs run out is what is left off — and a chapter that begins there
+/// begins nowhere, since no frame of it is kept.
+///
+/// A conversion that leaves nothing off holds nothing: every feed goes straight down the channel,
+/// in the order and at the moment it always did.
+struct Tail<'a> {
+    /// Where the feeds go.
+    feed: &'a SyncSender<Feed>,
+    /// How many frames are left off the end.
+    hold: u64,
+    /// The chapters that begin at the next block to arrive.
+    pending: Vec<Feed>,
+    /// The blocks kept back, each behind the chapters that begin at it, in the order they play.
+    held: VecDeque<(Vec<Feed>, Vec<i16>)>,
+    /// How many frames the blocks kept back come to.
+    frames: u64,
+}
+
+impl<'a> Tail<'a> {
+    /// A sending end over `feed` that leaves the last `hold` frames off.
+    fn new(feed: &'a SyncSender<Feed>, hold: u64) -> Self {
+        Self {
+            feed,
+            hold,
+            pending: Vec::new(),
+            held: VecDeque::new(),
+            frames: 0,
+        }
+    }
+
+    /// A chapter begins in front of the next block. `false` means nobody is reading any more.
+    fn chapter(&mut self, title: Option<String>) -> bool {
+        if self.hold == 0 {
+            return self.feed.send(Feed::Chapter(title)).is_ok();
+        }
+        self.pending.push(Feed::Chapter(title));
+
+        true
+    }
+
+    /// The next block of audio. `false` means nobody is reading any more.
+    fn block(&mut self, block: Vec<i16>) -> bool {
+        if self.hold == 0 {
+            return self.feed.send(Feed::Block(block)).is_ok();
+        }
+        self.frames = self.frames.saturating_add(frames_of(&block));
+        self.held
+            .push_back((std::mem::take(&mut self.pending), block));
+
+        while let Some((chapters, block)) = self.clear() {
+            if !self.send(chapters, block) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// The block at the front, where as many frames as are left off stand behind it: it cannot be
+    /// part of the end any more.
+    fn clear(&mut self) -> Option<(Vec<Feed>, Vec<i16>)> {
+        let frames = frames_of(&self.held.front()?.1);
+        if self.frames - frames < self.hold {
+            return None;
+        }
+        self.frames -= frames;
+
+        self.held.pop_front()
+    }
+
+    /// The inputs have run out, so what is held is the end: the frames to leave off go, and what
+    /// was held beyond them — less than one block, the front of the first — is audio after all.
+    fn finish(mut self) {
+        let over = self.frames.saturating_sub(self.hold);
+        if let Some((chapters, mut block)) = self.held.pop_front().filter(|_| over > 0) {
+            let keep = usize::try_from(over).unwrap_or(usize::MAX);
+            block.truncate(keep.saturating_mul(usize::from(CHANNELS)));
+            // Nobody reading any more is a conversion that has failed and says so itself.
+            let _ = self.send(chapters, block);
+        }
+    }
+
+    /// Hands `block` on behind the chapters that begin at it.
+    fn send(&self, chapters: Vec<Feed>, block: Vec<i16>) -> bool {
+        chapters
+            .into_iter()
+            .chain([Feed::Block(block)])
+            .all(|feed| self.feed.send(feed).is_ok())
+    }
+}
+
+/// How many frames a block of interleaved stereo holds.
+fn frames_of(block: &[i16]) -> u64 {
+    u64::try_from(block.len() / usize::from(CHANNELS)).unwrap_or(u64::MAX)
 }
 
 /// Where a chapter begins and what it is called: a mark an input carried, and an entry of the plan
@@ -341,11 +447,9 @@ impl AudioSource for Concat {
 
             match pcm.next_block() {
                 Ok(Some(block)) => {
-                    let frames =
-                        u64::try_from(block.len() / usize::from(CHANNELS)).unwrap_or(u64::MAX);
                     self.reading
                         .frames
-                        .set(self.reading.frames.get().saturating_add(frames));
+                        .set(self.reading.frames.get().saturating_add(frames_of(&block)));
 
                     return Ok(Some(block));
                 }
@@ -452,11 +556,11 @@ fn stated(offsets: &[u64]) -> Vec<Chapter> {
 mod tests {
     use super::{
         produce, AudioSource, ChapterMode, Concat, Conversion, Feed, Input, Produced, Reading,
-        SourceMetadata,
+        SourceMetadata, Tail,
     };
     use std::io::Cursor;
     use std::rc::Rc;
-    use std::sync::mpsc::sync_channel;
+    use std::sync::mpsc::{sync_channel, Receiver};
 
     /// The frames of 48 kHz stereo a sounding input here holds: a second of them, which is more
     /// than one block, so a reading that stopped inside one is told apart from one that ran out.
@@ -520,6 +624,105 @@ mod tests {
             // did is this module's.
             Feed::Block(_) => String::from("block"),
         }
+    }
+
+    /// A block of `frames` frames with every sample at `level`, which is what a test finds it by.
+    fn block(frames: usize, level: i16) -> Vec<i16> {
+        vec![level; frames * 2]
+    }
+
+    /// What has come down the channel since it was last asked: a block as its frames and its
+    /// level, everything else as [`named`] calls it.
+    fn seen(feeds: &Receiver<Feed>) -> Vec<String> {
+        feeds
+            .try_iter()
+            .map(|feed| match feed {
+                Feed::Block(block) => format!(
+                    "{} of {}",
+                    block.len() / 2,
+                    block.first().copied().unwrap_or_default()
+                ),
+                other => named(&other),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_conversion_that_leaves_nothing_off_hands_every_feed_straight_on() {
+        let (tx, rx) = sync_channel(8);
+        let mut tail = Tail::new(&tx, 0);
+
+        assert!(tail.chapter(None));
+        assert_eq!(seen(&rx), ["chapter None"]);
+        assert!(tail.block(block(4, 1)));
+        assert_eq!(seen(&rx), ["4 of 1"]);
+        tail.finish();
+        assert!(seen(&rx).is_empty());
+    }
+
+    #[test]
+    fn the_end_is_held_back_until_audio_stands_behind_it() {
+        let (tx, rx) = sync_channel(8);
+        let mut tail = Tail::new(&tx, 4);
+
+        // Four frames are what is left off, so the first four that arrive may be the end.
+        assert!(tail.chapter(None));
+        assert!(tail.block(block(4, 1)));
+        assert!(seen(&rx).is_empty());
+        // With exactly four more behind them they are not, and go on with the chapter they begin.
+        assert!(tail.block(block(4, 2)));
+        assert_eq!(seen(&rx), ["chapter None", "4 of 1"]);
+        // Three more leave the block in front one frame short of being clear of the end.
+        assert!(tail.block(block(3, 3)));
+        assert!(seen(&rx).is_empty());
+        // And the input running out settles it: of the seven frames held, the last four go.
+        tail.finish();
+        assert_eq!(seen(&rx), ["3 of 2"]);
+    }
+
+    #[test]
+    fn a_chapter_that_begins_in_what_is_left_off_begins_nowhere() {
+        let (tx, rx) = sync_channel(8);
+        let mut tail = Tail::new(&tx, 4);
+
+        assert!(tail.block(block(4, 1)));
+        assert!(tail.chapter(Some(String::from("Two"))));
+        assert!(tail.block(block(4, 2)));
+        tail.finish();
+
+        assert_eq!(seen(&rx), ["4 of 1"]);
+    }
+
+    #[test]
+    fn a_stream_no_longer_than_what_is_left_off_hands_nothing_on() {
+        for hold in [8, 9] {
+            let (tx, rx) = sync_channel(8);
+            let mut tail = Tail::new(&tx, hold);
+
+            assert!(tail.chapter(None));
+            assert!(tail.block(block(4, 1)));
+            assert!(tail.block(block(4, 2)));
+            tail.finish();
+
+            assert!(seen(&rx).is_empty(), "holding {hold} of 8 frames");
+        }
+    }
+
+    #[test]
+    fn a_reading_nobody_takes_from_is_told_so_whether_it_holds_anything_back_or_not() {
+        let (tx, rx) = sync_channel(8);
+        drop(rx);
+
+        let mut straight = Tail::new(&tx, 0);
+        assert!(!straight.chapter(None));
+        assert!(!straight.block(block(4, 1)));
+
+        let mut holding = Tail::new(&tx, 4);
+        assert!(holding.block(block(4, 1)));
+        assert!(
+            !holding.block(block(4, 2)),
+            "the first block had nowhere to go"
+        );
     }
 
     /// The inputs as one stream, which is what an explicit plan makes of them — so that the input

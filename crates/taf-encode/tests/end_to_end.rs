@@ -886,6 +886,7 @@ fn the_file_does_not_depend_on_how_many_encoders_ran() {
     let with = |workers| Conversion {
         chapter_mode: ChapterMode::Auto,
         silence: SilenceOpts::default(),
+        skip_trailing: 0,
         workers,
     };
 
@@ -912,4 +913,87 @@ fn an_input_that_does_not_decode_names_itself() {
         refusal.to_string().contains("broken.wav"),
         "the refusal names the input it happened in: {refusal}"
     );
+}
+
+#[test]
+fn what_a_conversion_leaves_off_the_end_is_not_in_the_file() {
+    let taf = validated(
+        vec![input(tone_wav(96_000), "tone.wav")],
+        &Conversion {
+            skip_trailing: 48_000,
+            ..Conversion::default()
+        },
+    );
+
+    // One second of the two is left: 48 000 frames, which is 17 packets with the last filled out.
+    assert_eq!(taf.summary.total_samples, 17 * FRAME);
+    close(taf.report.duration, Duration::from_secs(1), FRAME_TIME);
+}
+
+#[test]
+fn the_end_is_counted_on_the_audio_the_silence_operations_hand_out() {
+    let taf = validated(
+        vec![input(tone_wav(48_000), "tone.wav")],
+        &Conversion {
+            silence: SilenceOpts {
+                add_pause_leading: 48_000,
+                ..SilenceOpts::default()
+            },
+            skip_trailing: 48_000,
+            ..Conversion::default()
+        },
+    );
+
+    // A second of pause in front of a second of tone, and the last second left off: what is left
+    // is the pause, which is what leaving the end off after the pause went in comes to.
+    assert_eq!(taf.summary.total_samples, 17 * FRAME);
+    assert!(peak(&decoded(&taf.file), 0..47_000) < QUIET);
+}
+
+#[test]
+fn the_end_reaches_back_across_the_inputs_it_is_longer_than() {
+    let taf = validated(
+        vec![
+            input(tone_wav(48_000), "one.wav"),
+            input(tone_wav(24_000), "two.wav"),
+        ],
+        &Conversion {
+            skip_trailing: 36_000,
+            ..Conversion::default()
+        },
+    );
+
+    // The second input is gone whole and a quarter second of the first with it, so the chapter
+    // the second input would have begun begins nowhere.
+    assert_eq!(taf.summary.total_samples, 13 * FRAME);
+    assert_eq!(taf.chapters, [0]);
+}
+
+#[test]
+fn a_chapter_stated_inside_what_is_left_off_is_no_chapter_and_no_refusal() {
+    let taf = validated(
+        vec![input(tone_wav(96_000), "tone.wav")],
+        &Conversion {
+            chapter_mode: ChapterMode::Explicit(vec![0, 72_000]),
+            skip_trailing: 48_000,
+            ..Conversion::default()
+        },
+    );
+
+    assert_eq!(taf.chapters, [0]);
+}
+
+#[test]
+fn leaving_off_more_than_there_is_leaves_the_file_a_book_with_no_audio_is() {
+    let taf = validated(
+        vec![input(tone_wav(24_000), "tone.wav")],
+        &Conversion {
+            skip_trailing: 48_000,
+            ..Conversion::default()
+        },
+    );
+
+    assert_eq!(taf.summary.total_samples, FRAME);
+    assert_eq!(taf.chapters, [0]);
+    assert!(taf.report.duration < FRAME_TIME);
 }

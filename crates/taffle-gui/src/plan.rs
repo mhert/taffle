@@ -141,6 +141,7 @@ pub fn capture(panel: &Panel) -> Result<BookPlan, CaptureError> {
                     "add pause each chapter",
                 )?,
             },
+            skip_trailing: 0,
             // Nothing in the panel states how many encoders to run, so a conversion takes the
             // machine as it finds it.
             workers: None,

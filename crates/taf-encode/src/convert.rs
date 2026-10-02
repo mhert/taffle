@@ -171,6 +171,11 @@ pub struct Conversion {
     pub chapter_mode: ChapterMode,
     /// What is taken off the audio and what is put into it.
     pub silence: SilenceOpts,
+    /// How many frames are left off the end of the audio, counted on what the silence operations
+    /// hand out — so a pause that was put in and a silence that was trimmed have already happened
+    /// to what is counted. A chapter that would begin in what is left off begins nowhere, and is
+    /// no refusal either: an offset the caller stated there is still an offset inside the audio.
+    pub skip_trailing: u64,
     /// How many encoders run at once. `None` is one per core the machine states. What it never
     /// changes is the file: the bytes are the same whatever number runs.
     pub workers: Option<std::num::NonZeroUsize>,
