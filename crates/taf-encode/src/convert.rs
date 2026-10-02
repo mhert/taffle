@@ -463,9 +463,7 @@ fn run<W: Write + Seek>(
             drop(job_tx);
             let outcome = fed.and_then(|()| collector.drain(&batch_rx));
 
-            let produced = decoding.join().map_err(|_| {
-                ConvertError::Io(std::io::Error::other("the decoding thread failed"))
-            })?;
+            let produced = decoding.join().map_err(|_| failed("the decoding thread"))?;
             outcome?;
             let (closed, open) = collector.finish();
 
@@ -581,6 +579,11 @@ impl From<WriterIoError> for ConvertError {
             other => Self::Io(std::io::Error::other(other)),
         }
     }
+}
+
+/// The failure of a thread that stopped without saying why, named by what it was doing.
+fn failed(thread: &str) -> ConvertError {
+    ConvertError::Io(std::io::Error::other(format!("{thread} failed")))
 }
 
 /// The next job of the queue the workers share, waited for under the lock so that one job goes to
@@ -751,9 +754,7 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
             self.accept(batch)?;
         }
         if self.next < self.dispatched {
-            return Err(ConvertError::Io(std::io::Error::other(
-                "an encoding worker failed",
-            )));
+            return Err(failed("an encoding worker"));
         }
 
         Ok(())
