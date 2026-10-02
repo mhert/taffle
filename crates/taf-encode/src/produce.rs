@@ -293,9 +293,9 @@ fn frames_of(block: &[i16]) -> u64 {
 /// a conversion runs — which are the same thing, since a plan is what became of the marks.
 ///
 /// Offsets are frames at 48 kHz, counted from the start of the stream the chapter belongs to.
-struct Chapter {
-    offset: u64,
-    title: Option<String>,
+pub(crate) struct Chapter {
+    pub(crate) offset: u64,
+    pub(crate) title: Option<String>,
 }
 
 impl Chapter {
@@ -522,7 +522,7 @@ fn silence(opts: &SilenceOpts, base: usize) -> SilenceOpts {
 /// The half of the rule that needs a length is the stream's: a mark at or behind the end of the
 /// audio never begins a chapter, because the stream ends in front of the block it would have begun
 /// — and nothing knows where that end is until the audio has run out.
-fn authored(mut marks: Vec<Chapter>) -> Vec<Chapter> {
+pub(crate) fn authored(mut marks: Vec<Chapter>) -> Vec<Chapter> {
     marks.sort_by_key(|mark| mark.offset);
 
     let mut plan: Vec<Chapter> = Vec::with_capacity(marks.len() + 1);
@@ -549,7 +549,7 @@ fn authored(mut marks: Vec<Chapter>) -> Vec<Chapter> {
 ///
 /// No chapter of one is named: an offset somebody typed is a place, and what an input happened to
 /// call a mark near it is not that place's name.
-fn stated(offsets: &[u64]) -> Vec<Chapter> {
+pub(crate) fn stated(offsets: &[u64]) -> Vec<Chapter> {
     let mut plan = Vec::with_capacity(offsets.len() + 1);
     if offsets.first() != Some(&0) {
         plan.push(Chapter::opening());
