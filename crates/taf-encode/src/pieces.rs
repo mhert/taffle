@@ -363,6 +363,17 @@ mod tests {
     }
 
     #[test]
+    fn a_middle_cut_leaves_a_chapter_for_every_cut_behind_it_too() {
+        // Pins the window of a cut that is neither the first nor the last: the places before the
+        // cut in front of it are closed, and the places the cuts behind it need are kept. Cut 2
+        // aims at 500, but with 40 held for the last cut only 30 is open to it.
+        assert_eq!(
+            planned(&book(1000, &[0, 10, 20, 30, 40]), &Conversion::default(), 4),
+            [(0, 2, 20), (2, 1, 10), (3, 1, 10), (4, 1, 960)]
+        );
+    }
+
+    #[test]
     fn a_cut_goes_behind_the_one_in_front_of_it() {
         // Both even points lie in the one long chapter, and the nearest start to both is 900.
         assert_eq!(
