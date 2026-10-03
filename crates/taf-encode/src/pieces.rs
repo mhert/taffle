@@ -21,6 +21,10 @@
 //! So a book with at least as many chapters as pieces comes out as exactly that many pieces, the
 //! cuts strictly increase, and one very long chapter cannot draw two cuts onto one place.
 //!
+//! A chapter list the caller typed is held to the rule the conversion holds it to first: offsets
+//! that do not strictly increase are refused before anything is planned, since a plan made of
+//! them would cut backwards.
+//!
 //! # Cuts listed by chapter
 //!
 //! A cut after chapter `k`, counted from 1, falls where the chapter behind it begins — at the
@@ -44,8 +48,8 @@
 
 use std::num::NonZeroUsize;
 
-use crate::chapters::ChapterMode;
-use crate::convert::Conversion;
+use crate::chapters::{ChapterError, ChapterMode};
+use crate::convert::{increasing, Conversion};
 use crate::produce::{authored, stated, Chapter};
 
 /// What one input states about itself in its headers, in frames at 48 kHz.
@@ -104,6 +108,10 @@ pub enum PieceError {
     /// The skips leave no audio between them.
     #[error("nothing is left to split once the leading and trailing skips are taken off")]
     NothingLeft,
+    /// The chapter list the caller typed does not strictly increase, which the conversion
+    /// refuses in the same words.
+    #[error("{}", ChapterError::NotSorted)]
+    NotSorted,
     /// No chapter begins behind the one listed and inside what is split: it is the last chapter,
     /// or the one behind it begins in a skip.
     #[error("nothing is left after chapter {chapter} to begin a piece with")]
@@ -139,7 +147,8 @@ pub fn plan_pieces(
     pieces: NonZeroUsize,
 ) -> Result<PiecePlan, PieceError> {
     let (start, end) = split(layouts, opts)?;
-    let places = places(&chapter_starts(layouts, &opts.chapter_mode), start, end);
+    let chapters = chapter_starts(layouts, &opts.chapter_mode);
+    let places = places(&chapters, start, end);
     let pieces = pieces.get();
     if places.len() + 1 < pieces {
         return Err(PieceError::TooFewChapters {
@@ -188,13 +197,7 @@ pub fn plan_cuts(
             })
             .map(|(at, (index, offset))| (at, *index, *offset))
             .ok_or(PieceError::NoChapterAfter { chapter })?;
-        // A typed chapter list is put in order by nothing in front of the conversion, so a later
-        // place need not lie later in the audio: a cut has to be behind the one in front of it
-        // both ways.
-        if cuts
-            .last()
-            .is_some_and(|&(at, _, offset)| cut.0 <= at || cut.2 <= offset)
-        {
+        if cuts.last().is_some_and(|&(_, _, offset)| cut.2 <= offset) {
             return Err(PieceError::CutsNotIncreasing);
         }
         cuts.push(cut);
@@ -204,8 +207,12 @@ pub fn plan_cuts(
 }
 
 /// What is split of the conversion `opts` states over inputs that state `layouts`: from where
-/// the leading skip ends to where the trailing one begins.
+/// the leading skip ends to where the trailing one begins — where `opts` states a plan that can
+/// be cut at all.
 fn split(layouts: &[Layout], opts: &Conversion) -> Result<(u64, u64), PieceError> {
+    if let ChapterMode::Explicit(offsets) = &opts.chapter_mode {
+        increasing(offsets).map_err(|_| PieceError::NotSorted)?;
+    }
     let total = layouts
         .iter()
         .fold(0_u64, |sum, layout| sum.saturating_add(layout.frames));
@@ -516,21 +523,35 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_list_out_of_order_draws_no_cut_backwards() {
-        // A list nobody sorted is refused by the conversion; in front of it, its chapters at 60
-        // and at 30 are no pair of cuts either way round.
-        let stated = Conversion {
-            chapter_mode: ChapterMode::Explicit(vec![60 * SECOND, 30 * SECOND]),
-            ..Conversion::default()
-        };
+    fn a_typed_list_that_does_not_strictly_increase_is_refused_before_anything_is_planned() {
+        // The conversion refuses both lists, and a plan made of them would cut backwards.
+        for offsets in [
+            vec![60 * SECOND, 30 * SECOND],
+            vec![30 * SECOND, 30 * SECOND],
+        ] {
+            let stated = Conversion {
+                chapter_mode: ChapterMode::Explicit(offsets.clone()),
+                ..Conversion::default()
+            };
+            let layouts = files(&[100]);
 
-        for after in [&[1, 2][..], &[2, 1]] {
             assert_eq!(
-                cut(&files(&[100]), &stated, after).expect_err("no plan"),
-                PieceError::CutsNotIncreasing,
-                "{after:?}"
+                refused(&layouts, &stated, 2),
+                PieceError::NotSorted,
+                "{offsets:?}"
             );
+            for after in [&[][..], &[1], &[2, 1]] {
+                assert_eq!(
+                    cut(&layouts, &stated, after).expect_err("no plan"),
+                    PieceError::NotSorted,
+                    "{offsets:?} {after:?}"
+                );
+            }
         }
+        assert_eq!(
+            PieceError::NotSorted.to_string(),
+            "chapter offsets must be strictly increasing"
+        );
     }
 
     #[test]

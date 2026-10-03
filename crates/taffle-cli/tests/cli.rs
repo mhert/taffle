@@ -821,6 +821,23 @@ fn a_run_cut_after_the_chapters_listed_says_the_pieces_first_and_writes_one_file
 }
 
 #[test]
+fn a_typed_chapter_list_out_of_order_is_refused_before_the_pieces_are_planned() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(3.0));
+
+    taffle()
+        .arg(&book)
+        .args(["--chapters", "0:02,0:01", "--pieces", "2"])
+        .assert()
+        .code(1)
+        .stderr(
+            contains("chapter offsets must be strictly increasing").and(contains("pieces:").not()),
+        );
+
+    assert_eq!(listing(dir.path()), ["book.wav"]);
+}
+
+#[test]
 fn a_cut_after_a_chapter_nothing_follows_is_refused_before_anything_is_written() {
     let dir = TempDir::new().expect("a directory of its own");
     let inputs = [

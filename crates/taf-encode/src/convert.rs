@@ -806,7 +806,7 @@ impl<'a, W: Write + Seek> Collector<'a, W> {
 
 /// Whether the offsets the caller stated could be a plan at all: the half of the check that needs
 /// no length, and so the half that is answered before anything is written.
-fn increasing(offsets: &[u64]) -> Result<(), ChapterError> {
+pub(crate) fn increasing(offsets: &[u64]) -> Result<(), ChapterError> {
     let mut previous = None;
     for offset in offsets.iter().copied() {
         if previous.is_some_and(|earlier| offset <= earlier) {

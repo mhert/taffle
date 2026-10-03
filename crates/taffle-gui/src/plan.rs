@@ -678,6 +678,23 @@ mod tests {
     }
 
     #[test]
+    fn a_chapter_list_out_of_order_is_refused_before_the_book_is_cut() {
+        for (pieces, split_after) in [("2", ""), ("", "1")] {
+            let mut p = panel(&["b.m4b"]);
+            p.chapters_text = "0:02,0:01".into();
+            p.pieces_text = pieces.into();
+            p.split_after_text = split_after.into();
+
+            assert_eq!(
+                capture(&p, &two_chapters())
+                    .expect_err("no plan")
+                    .to_string(),
+                "chapter offsets must be strictly increasing"
+            );
+        }
+    }
+
+    #[test]
     fn a_piece_longer_than_a_box_plays_says_which_one() {
         let piece = |chapters| PlannedPiece {
             first_chapter: 0,
