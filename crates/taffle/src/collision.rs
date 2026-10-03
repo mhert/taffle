@@ -67,7 +67,7 @@ pub fn refuse_collisions(jobs: &[ConvertJob]) -> Result<(), CollisionError> {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::refuse_collisions;
     use crate::{Conversion, ConvertJob};
@@ -142,9 +142,15 @@ mod tests {
         );
         // Or what another job reads.
         let reads = [pieces.clone(), job(&["x/a-1.taf"], Some("c.taf"))];
+        // The name refused is the piece's, which is derived and so joined the way the platform
+        // joins a path: `x\a-1.taf` on Windows.
+        let derived = Path::new("x").join("a-1.taf");
         assert_eq!(
             refuse_collisions(&reads).expect_err("a collision").to_string(),
-            "the output x/a-1.taf is one of the inputs: converting it would write over the audio being read"
+            format!(
+                "the output {} is one of the inputs: converting it would write over the audio being read",
+                derived.display()
+            )
         );
         // The name the pieces are derived from is not one of them, and is free.
         assert!(refuse_collisions(&[pieces, job(&["b.mp3"], Some("x/a.taf"))]).is_ok());
