@@ -778,6 +778,125 @@ fn a_run_cut_into_pieces_says_them_first_and_writes_one_file_each() {
 }
 
 #[test]
+fn a_run_cut_after_the_chapters_listed_says_the_pieces_first_and_writes_one_file_each() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let inputs = [
+        wav(dir.path(), "01.wav", &tone(2.0)),
+        wav(dir.path(), "02.wav", &tone(1.0)),
+        wav(dir.path(), "03.wav", &tone(1.0)),
+    ];
+    let first = dir.path().join("01-1.taf");
+    let second = dir.path().join("01-2.taf");
+
+    taffle()
+        .args(&inputs)
+        .args(["--split-after", "1"])
+        .assert()
+        .success()
+        .stderr(
+            contains("warning: only")
+                .not()
+                .and(contains("2 pieces:"))
+                .and(contains(format!(
+                    "  {}  ~0:02  (chapter 1)",
+                    first.display()
+                )))
+                .and(contains(format!(
+                    "  {}  ~0:02  (chapters 2-3)",
+                    second.display()
+                ))),
+        )
+        .stdout(
+            contains(format!("wrote {} (0:02, 1 chapter)", first.display())).and(contains(
+                format!("wrote {} (0:02, 2 chapters)", second.display()),
+            )),
+        );
+
+    assert_eq!(chapters_of(&first), 1);
+    assert_eq!(chapters_of(&second), 2);
+    assert_eq!(
+        listing(dir.path()),
+        ["01-1.taf", "01-2.taf", "01.wav", "02.wav", "03.wav"]
+    );
+}
+
+#[test]
+fn a_cut_after_a_chapter_nothing_follows_is_refused_before_anything_is_written() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let inputs = [
+        wav(dir.path(), "01.wav", &tone(2.0)),
+        wav(dir.path(), "02.wav", &tone(1.0)),
+        wav(dir.path(), "03.wav", &tone(1.0)),
+    ];
+
+    taffle()
+        .args(&inputs)
+        .args(["--split-after", "3"])
+        .assert()
+        .code(1)
+        .stderr(contains(
+            "nothing is left after chapter 3 to begin a piece with",
+        ));
+
+    assert_eq!(listing(dir.path()), ["01.wav", "02.wav", "03.wav"]);
+}
+
+#[test]
+fn chapters_to_split_after_that_do_not_increase_are_refused_before_anything_is_written() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let inputs = [
+        wav(dir.path(), "01.wav", &tone(1.0)),
+        wav(dir.path(), "02.wav", &tone(1.0)),
+        wav(dir.path(), "03.wav", &tone(1.0)),
+    ];
+
+    taffle()
+        .args(&inputs)
+        .args(["--split-after", "2,1"])
+        .assert()
+        .code(1)
+        .stderr(contains(
+            "the chapters to split after must strictly increase",
+        ));
+
+    assert_eq!(listing(dir.path()), ["01.wav", "02.wav", "03.wav"]);
+}
+
+#[test]
+fn a_chapter_to_split_after_that_is_no_chapter_number_is_a_usage_error() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(0.5));
+
+    for list in ["0", "x", "1,0"] {
+        taffle()
+            .arg(&book)
+            .args(["--split-after", list])
+            .assert()
+            .code(2)
+            .stderr(contains("invalid value").and(contains("--split-after <LIST>")));
+    }
+}
+
+#[test]
+fn a_piece_count_and_chapters_to_split_after_are_two_ways_to_cut_and_a_usage_error() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(0.5));
+
+    taffle()
+        .arg(&book)
+        .args(["--pieces", "2", "--split-after", "1"])
+        .assert()
+        .code(2)
+        .stderr(
+            contains("cannot be used with")
+                .and(contains("--split-after <LIST>"))
+                .and(contains("--pieces <N>")),
+        );
+
+    assert_eq!(listing(dir.path()), ["book.wav"]);
+}
+
+#[test]
 fn the_pieces_of_a_named_output_are_named_after_it_and_each_gets_the_cover() {
     let dir = TempDir::new().expect("a directory of its own");
     let book = dir.path().join(BOOK);

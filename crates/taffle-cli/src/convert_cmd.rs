@@ -8,15 +8,15 @@
 //! box plays, the plan of a run cut into pieces, a cover that could not be written — goes to
 //! stderr, because none of it is the answer to what was asked.
 
-use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use anyhow::Result;
 use taffle::duration::{clock, RATE};
 use taffle::{
-    default_output_path, fewer_pieces, output_paths, plan_pieces, planned_chapters, probe_layout,
-    refuse_collisions, run_convert, ChapterError, ChapterMode, Conversion, ConvertError,
-    ConvertJob, JobError, JobOutcome, Layout, PiecePlan, Progress, SilenceOpts, MAX_CHAPTERS,
+    default_output_path, fewer_pieces, output_paths, plan_cuts, plan_pieces, planned_chapters,
+    probe_layout, refuse_collisions, run_convert, ChapterError, ChapterMode, Conversion,
+    ConvertError, ConvertJob, JobError, JobOutcome, Layout, PiecePlan, PlanError, Progress,
+    SilenceOpts, MAX_CHAPTERS,
 };
 
 use crate::cli::ConvertArgs;
@@ -27,14 +27,22 @@ use crate::cli::ConvertArgs;
 ///
 /// If the output is one of the inputs, or if the conversion itself failed — an input that could not
 /// be read, a file that could not be written, a chapter list that is no plan.
-pub fn run(args: ConvertArgs) -> Result<()> {
+pub fn run(mut args: ConvertArgs) -> Result<()> {
     let pieces = args.pieces;
+    let split_after = std::mem::take(&mut args.split_after);
     let mut job = job(args);
 
     // Pieces are settled in front of the audio, from what the files state about themselves —
-    // which is also the moment to say how long each of them will be.
-    let plan = if pieces.get() > 1 {
-        Some(planned(&mut job, pieces)?)
+    // which is also the moment to say how long each of them will be. The two ways of choosing
+    // the cuts cannot both be typed, so at most one of them is asked for here.
+    let plan = if !split_after.is_empty() {
+        Some(planned(&mut job, |job, layouts| {
+            plan_cuts(job, layouts, &split_after)
+        })?)
+    } else if pieces.get() > 1 {
+        Some(planned(&mut job, |job, layouts| {
+            plan_pieces(job, layouts, pieces)
+        })?)
     } else {
         None
     };
@@ -91,14 +99,18 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     Ok(())
 }
 
-/// Plans the pieces `job` is cut into, puts the cuts into the job, and says what they are.
-fn planned(job: &mut ConvertJob, pieces: NonZeroUsize) -> Result<PiecePlan> {
+/// Plans the pieces `job` is cut into the way `cuts` chooses them from what its files state, puts
+/// the cuts into the job, and says what they are.
+fn planned(
+    job: &mut ConvertJob,
+    cuts: impl FnOnce(&ConvertJob, &[Option<Layout>]) -> Result<PiecePlan, PlanError>,
+) -> Result<PiecePlan> {
     let layouts: Vec<Option<Layout>> = job
         .inputs
         .iter()
         .map(|input| probe_layout(input).ok())
         .collect();
-    let plan = plan_pieces(job, &layouts, pieces)?;
+    let plan = cuts(job, &layouts)?;
     job.piece_starts = plan.starts();
     announce(job, &plan);
 
@@ -140,6 +152,7 @@ fn job(args: ConvertArgs) -> ConvertJob {
         add_pause_each_chapter,
         chapters,
         pieces: _,
+        split_after: _,
         no_cover,
     } = args;
 

@@ -45,6 +45,9 @@ pub struct Panel {
     pub add_pause_each_text: String,
     /// How many files the book is written as. Empty is one.
     pub pieces_text: String,
+    /// The chapters a piece ends after, counted from 1 and separated by commas. Empty cuts the
+    /// book after none of them.
+    pub split_after_text: String,
     /// Whether the cover art an input carries is written beside the TAF.
     pub extract_cover: bool,
 }
@@ -73,6 +76,7 @@ impl Default for Panel {
             add_pause_leading_text: String::new(),
             add_pause_each_text: String::new(),
             pieces_text: String::new(),
+            split_after_text: String::new(),
             // A cover is extracted unless somebody switches it off, which is what the command
             // line's own `--no-cover` default is. Written out rather than derived from the type,
             // because a derived default is `false` — and this is the panel a book is added from
@@ -122,6 +126,16 @@ pub enum CaptureError {
         /// What was typed there.
         text: String,
     },
+    /// One entry of the split-after list is no chapter number.
+    #[error("the split-after list holds '{text}', which is no chapter number")]
+    BadSplitAfter {
+        /// The entry that is no chapter number, as it was typed.
+        text: String,
+    },
+    /// Both a piece count above one and chapters to split after were typed, and each of them
+    /// cuts the book a way of its own.
+    #[error("Pieces and Split after chapters are two ways to cut a book: fill in one of them")]
+    TwoWaysToCut,
     /// The book cannot be cut into the pieces that were typed.
     #[error(transparent)]
     Pieces(#[from] taffle::PlanError),
@@ -139,10 +153,13 @@ pub enum CaptureError {
 ///   naming the field and echoing what was typed.
 /// - [`CaptureError::BadChapterEntry`] where an entry of the chapter list is no duration.
 /// - [`CaptureError::BadPieces`] where the pieces field holds no whole number of at least 1.
+/// - [`CaptureError::BadSplitAfter`] where an entry of the split-after list is no chapter number.
+/// - [`CaptureError::TwoWaysToCut`] where both a piece count above one and chapters to split
+///   after were typed.
 /// - [`CaptureError::Pieces`] where the book cannot be cut into the pieces that were typed.
 ///
 /// `layouts` is index-aligned with the files of the panel and read by whoever holds the panel. It
-/// is only looked at where more than one piece is typed.
+/// is only looked at where the book is cut: more than one piece, or any chapter to split after.
 pub fn capture(panel: &Panel, layouts: &[Option<Layout>]) -> Result<BookPlan, CaptureError> {
     let Some(first) = panel.files.first() else {
         return Err(CaptureError::NoFiles);
@@ -184,17 +201,19 @@ pub fn capture(panel: &Panel, layouts: &[Option<Layout>]) -> Result<BookPlan, Ca
         write_cover: panel.extract_cover,
         piece_starts: Vec::new(),
     };
-    // A book in one file is planned by nothing: only a count above one reads what the files
-    // state, so a file that states nothing still converts whole.
-    let pieces = match piece_count(&panel.pieces_text)? {
-        count if count.get() > 1 => {
-            let plan = taffle::plan_pieces(&job, layouts, count)?;
-            job.piece_starts = plan.starts();
-
-            Some(plan)
-        }
-        _ => None,
+    // A book in one file is planned by nothing: only a count above one or a chapter to split
+    // after reads what the files state, so a file that states nothing still converts whole.
+    let count = piece_count(&panel.pieces_text)?;
+    let after = split_after(&panel.split_after_text)?;
+    let pieces = match (count.get() > 1, after.is_empty()) {
+        (true, false) => return Err(CaptureError::TwoWaysToCut),
+        (true, true) => Some(taffle::plan_pieces(&job, layouts, count)?),
+        (false, false) => Some(taffle::plan_cuts(&job, layouts, &after)?),
+        (false, true) => None,
     };
+    if let Some(plan) = &pieces {
+        job.piece_starts = plan.starts();
+    }
 
     Ok(BookPlan {
         title,
@@ -204,7 +223,8 @@ pub fn capture(panel: &Panel, layouts: &[Option<Layout>]) -> Result<BookPlan, Ca
     })
 }
 
-/// How long the pieces of `plan` are stated to play, as the panel shows it under the count.
+/// How long the pieces of `plan` are stated to play, as the panel shows it under the fields that
+/// cut the book.
 ///
 /// The lengths are what the files state about themselves and what is trimmed or put in is not in
 /// them, which is what the sign in front says.
@@ -245,6 +265,24 @@ fn piece_count(text: &str) -> Result<NonZeroUsize, CaptureError> {
     text.parse().map_err(|_| CaptureError::BadPieces {
         text: text.to_owned(),
     })
+}
+
+/// The chapters `text` lists to split after, where nothing typed is none of them.
+///
+/// The list is read the way the chapter list is: split on commas, and every entry read exactly as
+/// it stands.
+fn split_after(text: &str) -> Result<Vec<NonZeroUsize>, CaptureError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    text.split(',')
+        .map(|entry| {
+            entry.parse().map_err(|_| CaptureError::BadSplitAfter {
+                text: entry.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Where the book in `panel` goes while nothing is typed into its output field: the name derived
@@ -546,6 +584,95 @@ mod tests {
         );
         assert_eq!(
             capture(&p, &[None]).expect_err("no length").to_string(),
+            "no length could be read off x/b.m4b, so the pieces cannot be planned"
+        );
+    }
+
+    #[test]
+    fn a_book_typed_with_chapters_to_split_after_is_cut_behind_them() {
+        // A piece count of one is the book in one file, which is no second way to cut it.
+        for count in ["", "1"] {
+            let mut p = panel(&["b.m4b"]);
+            p.pieces_text = count.into();
+            p.split_after_text = "1".into();
+
+            let plan = capture(&p, &two_chapters()).expect("a plan");
+
+            assert_eq!(plan.job.piece_starts, [1], "{count:?}");
+            assert_eq!(
+                plan.pieces.as_ref().map(pieces_preview).as_deref(),
+                Some("≈ 0:05 · 0:05"),
+                "{count:?}"
+            );
+            assert_eq!(plan.panel, p);
+        }
+    }
+
+    #[test]
+    fn a_fresh_panel_splits_after_no_chapter() {
+        assert_eq!(Panel::default().split_after_text, "");
+    }
+
+    #[test]
+    fn a_split_after_entry_that_is_no_chapter_number_is_named_as_it_was_typed() {
+        for (list, entry) in [
+            ("0", "0"),
+            ("x", "x"),
+            ("1,two", "two"),
+            ("1, 2", " 2"),
+            ("1,,2", ""),
+            ("1.5", "1.5"),
+        ] {
+            let mut p = panel(&["b.m4b"]);
+            p.split_after_text = list.into();
+
+            let error = capture(&p, &two_chapters()).expect_err("no list");
+
+            assert!(
+                matches!(&error, CaptureError::BadSplitAfter { text } if text == entry),
+                "{list:?}: {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("the split-after list holds '{entry}', which is no chapter number")
+            );
+        }
+    }
+
+    #[test]
+    fn a_piece_count_and_chapters_to_split_after_are_refused_together() {
+        let mut p = panel(&["b.m4b"]);
+        p.pieces_text = "2".into();
+        p.split_after_text = "1".into();
+
+        let error = capture(&p, &two_chapters()).expect_err("two ways");
+
+        assert!(matches!(error, CaptureError::TwoWaysToCut), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            "Pieces and Split after chapters are two ways to cut a book: fill in one of them"
+        );
+    }
+
+    #[test]
+    fn chapters_to_split_after_that_cannot_cut_the_book_say_why_as_the_command_line_does() {
+        let refused = |list: &str, layouts: &[Option<Layout>]| {
+            let mut p = panel(&["x/b.m4b"]);
+            p.split_after_text = list.into();
+
+            capture(&p, layouts).expect_err("no plan").to_string()
+        };
+
+        assert_eq!(
+            refused("2", &two_chapters()),
+            "nothing is left after chapter 2 to begin a piece with"
+        );
+        assert_eq!(
+            refused("1,1", &two_chapters()),
+            "the chapters to split after must strictly increase"
+        );
+        assert_eq!(
+            refused("1", &[None]),
             "no length could be read off x/b.m4b, so the pieces cannot be planned"
         );
     }
