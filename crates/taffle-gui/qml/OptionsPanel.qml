@@ -158,11 +158,27 @@ ColumnLayout {
         }
         onTextEdited: panel.app.setPieces(text)
     }
+
+    Label {
+        Layout.topMargin: panel.groupSpacing
+        text: qsTr("Split after chapters")
+    }
+    TextField {
+        Layout.fillWidth: true
+        // The example is the grammar itself, which no translation may move.
+        placeholderText: "1,5,6"
+        text: {
+            panel.app.revision;
+            panel.app.splitAfterText()
+        }
+        onTextEdited: panel.app.setSplitAfter(text)
+    }
     Label {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         // How long each piece is stated to play, read off the files before any of them is
-        // converted: an estimate, which is what the sign it begins with says. A book that cannot
+        // converted: an estimate, which is what the sign it begins with says. It is said under
+        // both fields that cut the book, since either of them makes the pieces. A book that cannot
         // be cut says why where every other refusal of the panel is said.
         visible: panel.app.piecesPreview !== ""
         opacity: 0.7
@@ -216,6 +232,7 @@ ColumnLayout {
     }
 
     // The fields stand at the top of the column, whatever the window's height leaves under them.
+    // It has no height of its own, so it adds nothing to the height the window is held to.
     Item {
         Layout.fillHeight: true
     }

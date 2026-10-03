@@ -11,12 +11,19 @@ ApplicationWindow {
     id: window
     title: qsTr("Taffle")
     width: 900
-    height: 560
     // The queue, the book being edited and the options are all shown at once, and this is the size
     // at which each of them still holds a path somebody can read; narrower than this, all three are
     // ellipsis.
     minimumWidth: 900
-    minimumHeight: 560
+    // The options are a column that does not scroll, so the window is never shorter than that
+    // column and what stands under it: the margins, the row of buttons and the gap over it. An
+    // option added to the panel lengthens the column and with it the window, rather than pushing
+    // the options under it out of sight. 560 is the floor the queue and the file list still read
+    // well at where the options need less. There is no height of its own: a window shorter than
+    // its minimum is grown to it, so this is also the height it opens at — and a window somebody
+    // made taller stays the height they made it.
+    minimumHeight: Math.max(560, options.implicitHeight + actions.implicitHeight
+                                 + 2 * content.anchors.margins + content.spacing)
     visible: true
 
     // The bridge. Held as a property of the window rather than by id alone, so that a delegate
@@ -84,6 +91,7 @@ ApplicationWindow {
     }
 
     ColumnLayout {
+        id: content
         anchors.fill: parent
         anchors.margins: 12
         spacing: 12
@@ -261,6 +269,7 @@ ApplicationWindow {
             }
 
             OptionsPanel {
+                id: options
                 app: window.app
                 onOutputPicked: file => window.app.setOutput(window.localPath(file))
                 Layout.fillHeight: true
@@ -276,6 +285,7 @@ ApplicationWindow {
         }
 
         RowLayout {
+            id: actions
             Layout.fillWidth: true
             spacing: 8
 

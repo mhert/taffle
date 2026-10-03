@@ -13,8 +13,8 @@
 //! plays, read off its headers, for a caller that wants a length before it wants a conversion.
 //!
 //! [`plan_pieces()`] settles in front of a conversion which chapter each of its pieces begins at,
-//! from the lengths and chapter marks the inputs state about themselves; [`probe_marks()`] reads
-//! those marks off an input's headers.
+//! from the lengths and chapter marks the inputs state about themselves, and [`plan_cuts()`] does
+//! the same for cuts listed by chapter; [`probe_marks()`] reads those marks off an input's headers.
 //!
 //! # The shape a conversion runs in
 //!
@@ -64,5 +64,5 @@ pub use decode::{
     open_source, AudioSource, Cover, DecodeError, SourceChapter, SourceMetadata, SourceSpec,
 };
 pub use pcm::{Pcm48, PcmError, SilenceOpts, SilenceProcessor, SILENCE_THRESHOLD};
-pub use pieces::{plan_pieces, Layout, PieceError, PiecePlan, PlannedPiece};
+pub use pieces::{plan_cuts, plan_pieces, Layout, PieceError, PiecePlan, PlannedPiece};
 pub use probe::{probe_duration, probe_marks, ProbeError};

@@ -139,6 +139,8 @@ Options (convert):
       --chapters <LIST>              Override chapter marks
                                      ("0:00,12:34,1:02:10.5")
       --pieces <N>                   Write the book as N files, cut at chapter starts
+      --split-after <LIST>           Write the book as several files, cut after the
+                                     chapters listed (e.g. 1,5,6)
       --no-cover                     Don't extract embedded cover art
 ```
 
@@ -210,6 +212,18 @@ Each piece is a book of its own: its chapters count from 1, it has its own audio
 the cover is beside it. The chapters are the ones the conversion would have anyway — an
 m4b's own marks, one per file where several are given, or the `--chapters` list — and a
 book with fewer of them than pieces is refused before anything is written.
+
+`--split-after` puts the cuts where you say instead: every chapter listed ends a piece. On
+that same book of sixteen chapters, this writes chapter 1, chapters 2-5, chapter 6 and
+chapters 7-16 as four files:
+
+```sh
+taffle book.m4b --split-after 1,5,6
+```
+
+The chapter numbers are the ones the conversion has, counted from 1, and they have to
+strictly increase. A chapter with nothing behind it to begin a piece with is refused before
+anything is written, and the pieces are named, covered and said as with `--pieces`.
 
 `--skip-trailing` drops seconds off the very end, the way `--skip-leading` drops them off
 the start. What is done to the start of a book is done to the first piece. The seconds

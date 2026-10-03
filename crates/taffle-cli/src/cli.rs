@@ -120,6 +120,23 @@ pub struct ConvertArgs {
     #[arg(long, value_name = "N", default_value = "1")]
     pub pieces: NonZeroUsize,
 
+    /// Write the book as several files, cut after the chapters listed (e.g. 1,5,6)
+    ///
+    /// Each chapter listed ends a piece, and the next piece begins with the chapter behind it, so
+    /// 1,5,6 writes chapter 1, chapters 2-5, chapter 6 and the rest as four files. The chapter
+    /// numbers are the ones the conversion has — an input's own marks, one per file where several
+    /// are given, or the --chapters list — counted from 1, and they have to strictly increase. A
+    /// chapter with no chapter behind it inside what is converted is refused before anything is
+    /// written. The pieces are named, covered and said before the conversion starts as with
+    /// --pieces.
+    #[arg(
+        long,
+        value_name = "LIST",
+        value_delimiter = ',',
+        conflicts_with = "pieces"
+    )]
+    pub split_after: Vec<NonZeroUsize>,
+
     /// Don't extract embedded cover art
     ///
     /// The cover of the first input that carries any goes beside the TAF under the output's own

@@ -56,8 +56,39 @@ pub fn plan_pieces(
     layouts: &[Option<Layout>],
     pieces: NonZeroUsize,
 ) -> Result<PiecePlan, PlanError> {
-    let stated: Vec<Layout> = job
-        .inputs
+    Ok(taf_encode::plan_pieces(
+        &stated(job, layouts)?,
+        &job.options,
+        pieces,
+    )?)
+}
+
+/// Plans the pieces of `job` cut after each of the chapters `after` lists, counted from 1, where
+/// `layouts` is what each of its inputs states, as for [`plan_pieces`].
+///
+/// # Errors
+///
+/// [`PlanError::NoLength`] naming the first input there is no layout for, and
+/// [`PlanError::Pieces`] where the engine refuses the cuts.
+pub fn plan_cuts(
+    job: &ConvertJob,
+    layouts: &[Option<Layout>],
+    after: &[NonZeroUsize],
+) -> Result<PiecePlan, PlanError> {
+    Ok(taf_encode::plan_cuts(
+        &stated(job, layouts)?,
+        &job.options,
+        after,
+    )?)
+}
+
+/// What every input of `job` states, where `layouts` holds it in the order the job names them.
+///
+/// # Errors
+///
+/// [`PlanError::NoLength`] naming the first input there is no layout for.
+fn stated(job: &ConvertJob, layouts: &[Option<Layout>]) -> Result<Vec<Layout>, PlanError> {
+    job.inputs
         .iter()
         .enumerate()
         .map(|(at, path)| {
@@ -67,9 +98,7 @@ pub fn plan_pieces(
                 .flatten()
                 .ok_or_else(|| PlanError::NoLength { path: path.clone() })
         })
-        .collect::<Result<_, _>>()?;
-
-    Ok(taf_encode::plan_pieces(&stated, &job.options, pieces)?)
+        .collect()
 }
 
 /// How many frames at 48 kHz `length` comes to, with what is short of a frame dropped.
@@ -101,7 +130,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::{fewer_pieces, frames_48k, plan_pieces, probe_layout, PlanError};
+    use super::{fewer_pieces, frames_48k, plan_cuts, plan_pieces, probe_layout, PlanError};
     use crate::{Conversion, ConvertJob, Layout, ProbeError};
 
     /// The fixture `name`, where `taf-encode` keeps the committed ones.
@@ -191,6 +220,62 @@ mod tests {
                 "no length could be read off x/02.mp3, so the pieces cannot be planned"
             );
         }
+    }
+
+    #[test]
+    fn a_job_is_cut_after_the_chapters_listed_from_what_its_inputs_state() {
+        let layouts = [Some(Layout {
+            frames: 720_000,
+            marks: vec![0, 240_000, 480_000],
+        })];
+        let plan = plan_cuts(&job(&["a.m4b"]), &layouts, &[two()]).expect("a plan");
+
+        assert_eq!(plan.starts(), [2]);
+        assert_eq!(
+            plan.pieces
+                .iter()
+                .map(|piece| piece.frames)
+                .collect::<Vec<_>>(),
+            [480_000, 240_000]
+        );
+    }
+
+    #[test]
+    fn an_input_no_length_could_be_read_off_is_named_however_the_cuts_are_chosen() {
+        let layouts = [
+            Some(Layout {
+                frames: 480_000,
+                marks: Vec::new(),
+            }),
+            None,
+        ];
+        let refusal = plan_cuts(
+            &job(&["x/01.mp3", "x/02.mp3"]),
+            &layouts,
+            &[NonZeroUsize::MIN],
+        )
+        .expect_err("no plan");
+
+        assert!(matches!(&refusal, PlanError::NoLength { path } if path == Path::new("x/02.mp3")));
+        assert_eq!(
+            refusal.to_string(),
+            "no length could be read off x/02.mp3, so the pieces cannot be planned"
+        );
+    }
+
+    #[test]
+    fn a_cut_the_engine_refuses_is_said_as_the_engine_says_it() {
+        let layouts = [Some(Layout {
+            frames: 480_000,
+            marks: Vec::new(),
+        })];
+        let refusal =
+            plan_cuts(&job(&["a.mp3"]), &layouts, &[NonZeroUsize::MIN]).expect_err("no plan");
+
+        assert_eq!(
+            refusal.to_string(),
+            "nothing is left after chapter 1 to begin a piece with"
+        );
     }
 
     #[test]

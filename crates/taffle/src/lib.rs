@@ -24,9 +24,10 @@
 //! without decoding a packet of it, so that a frontend can show the length of what it is about to
 //! convert before it converts any of it.
 //!
-//! [`plan_pieces`] and [`probe_layout`] are the same reading put to the cutting of a book into
-//! several files: what each input states about its length and its chapter marks, and the plan the
-//! engine makes of that, with the inputs that stated nothing named by path.
+//! [`plan_pieces`], [`plan_cuts`] and [`probe_layout`] are the same reading put to the cutting of
+//! a book into several files: what each input states about its length and its chapter marks, and
+//! the plan the engine makes of that — into a number of pieces, or after the chapters listed — with
+//! the inputs that stated nothing named by path.
 //!
 //! # A frontend depends on this crate and no other
 //!
@@ -69,7 +70,7 @@ use taf_encode::{convert_pieces, Input};
 pub use collision::{refuse_collisions, CollisionError};
 pub use inspect::{inspect, read_through, ChapterRead, InspectError, Inspection};
 pub use output::{default_output_path, output_paths, piece_path};
-pub use pieces::{fewer_pieces, plan_pieces, probe_layout, PlanError};
+pub use pieces::{fewer_pieces, plan_cuts, plan_pieces, probe_layout, PlanError};
 
 // What the workflows above hand back and take in, from the crates the types are defined in: a
 // frontend names them through here rather than depending on `taf` and `taf-encode` itself.

@@ -1,5 +1,6 @@
 //! Where a book is cut into pieces, settled before any of it is converted: [`plan_pieces`] takes
-//! what the inputs state about themselves and names the chapter every piece begins at.
+//! what the inputs state about themselves and names the chapter every piece begins at, and
+//! [`plan_cuts`] does the same for cuts somebody listed by chapter.
 //!
 //! # A plan names chapters, and a length only chooses between them
 //!
@@ -19,6 +20,14 @@
 //!
 //! So a book with at least as many chapters as pieces comes out as exactly that many pieces, the
 //! cuts strictly increase, and one very long chapter cannot draw two cuts onto one place.
+//!
+//! # Cuts listed by chapter
+//!
+//! A cut after chapter `k`, counted from 1, falls where the chapter behind it begins — at the
+//! place it shares with the chapters beginning there, under the last of them. That place has to
+//! be one of the places above, and the cuts have to strictly increase in the order they are
+//! listed: so a listed chapter with nothing behind it inside what is split, or a list that is out
+//! of order or names one place twice, is refused rather than read as some other cut.
 //!
 //! # What the lengths in a plan are worth
 //!
@@ -95,6 +104,17 @@ pub enum PieceError {
     /// The skips leave no audio between them.
     #[error("nothing is left to split once the leading and trailing skips are taken off")]
     NothingLeft,
+    /// No chapter begins behind the one listed and inside what is split: it is the last chapter,
+    /// or the one behind it begins in a skip.
+    #[error("nothing is left after chapter {chapter} to begin a piece with")]
+    NoChapterAfter {
+        /// The chapter listed, counted from 1.
+        chapter: usize,
+    },
+    /// The chapters listed do not cut in order: one of them cuts in front of, or in the same
+    /// place as, the one listed before it.
+    #[error("the chapters to split after must strictly increase")]
+    CutsNotIncreasing,
 }
 
 /// What `chapters` of them are called.
@@ -118,15 +138,7 @@ pub fn plan_pieces(
     opts: &Conversion,
     pieces: NonZeroUsize,
 ) -> Result<PiecePlan, PieceError> {
-    let total = layouts
-        .iter()
-        .fold(0_u64, |sum, layout| sum.saturating_add(layout.frames));
-    let start = opts.silence.skip_leading;
-    let end = total.saturating_sub(opts.skip_trailing);
-    if end <= start {
-        return Err(PieceError::NothingLeft);
-    }
-
+    let (start, end) = split(layouts, opts)?;
     let places = places(&chapter_starts(layouts, &opts.chapter_mode), start, end);
     let pieces = pieces.get();
     if places.len() + 1 < pieces {
@@ -142,6 +154,68 @@ pub fn plan_pieces(
         start,
         end,
     ))
+}
+
+/// Plans the pieces of the conversion `opts` states over inputs that state `layouts`, cut after
+/// each of the chapters `after` lists, counted from 1. Nothing listed is the book in one piece.
+///
+/// # Errors
+///
+/// [`PieceError::NothingLeft`] where the skips of `opts` leave nothing between them,
+/// [`PieceError::NoChapterAfter`] where no chapter begins inside what they leave behind one of
+/// those listed, and [`PieceError::CutsNotIncreasing`] where the cuts do not strictly increase in
+/// the order they are listed.
+pub fn plan_cuts(
+    layouts: &[Layout],
+    opts: &Conversion,
+    after: &[NonZeroUsize],
+) -> Result<PiecePlan, PieceError> {
+    let (start, end) = split(layouts, opts)?;
+    let chapters = chapter_starts(layouts, &opts.chapter_mode);
+    let places = places(&chapters, start, end);
+
+    let mut cuts: Vec<(usize, usize, u64)> = Vec::with_capacity(after.len());
+    for chapter in after.iter().map(|chapter| chapter.get()) {
+        // Chapter `k` counted from 1 is the one in front of chapter `k` counted from 0, which is
+        // where the piece behind it begins.
+        let cut = chapters
+            .get(chapter)
+            .and_then(|begins| {
+                places
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (_, offset))| offset == begins)
+            })
+            .map(|(at, (index, offset))| (at, *index, *offset))
+            .ok_or(PieceError::NoChapterAfter { chapter })?;
+        // A typed chapter list is put in order by nothing in front of the conversion, so a later
+        // place need not lie later in the audio: a cut has to be behind the one in front of it
+        // both ways.
+        if cuts
+            .last()
+            .is_some_and(|&(at, _, offset)| cut.0 <= at || cut.2 <= offset)
+        {
+            return Err(PieceError::CutsNotIncreasing);
+        }
+        cuts.push(cut);
+    }
+
+    Ok(laid_out(&cuts, places.len(), start, end))
+}
+
+/// What is split of the conversion `opts` states over inputs that state `layouts`: from where
+/// the leading skip ends to where the trailing one begins.
+fn split(layouts: &[Layout], opts: &Conversion) -> Result<(u64, u64), PieceError> {
+    let total = layouts
+        .iter()
+        .fold(0_u64, |sum, layout| sum.saturating_add(layout.frames));
+    let start = opts.silence.skip_leading;
+    let end = total.saturating_sub(opts.skip_trailing);
+    if end <= start {
+        return Err(PieceError::NothingLeft);
+    }
+
+    Ok((start, end))
 }
 
 /// Where every chapter of the conversion begins, by its place in the chapter plan.
@@ -262,7 +336,7 @@ fn laid_out(cuts: &[(usize, usize, u64)], places: usize, start: u64, end: u64) -
 mod tests {
     use std::num::NonZeroUsize;
 
-    use super::{plan_pieces, Layout, PieceError, PlannedPiece};
+    use super::{plan_cuts, plan_pieces, Layout, PieceError, PiecePlan, PlannedPiece};
     use crate::{ChapterMode, Conversion, SilenceOpts};
 
     /// One second, in the frames everything here is counted in.
@@ -300,6 +374,174 @@ mod tests {
     /// Why there is no plan for `pieces` pieces.
     fn refused(layouts: &[Layout], opts: &Conversion, pieces: usize) -> PieceError {
         plan_pieces(layouts, opts, NonZeroUsize::new(pieces).unwrap()).expect_err("no plan")
+    }
+
+    /// The sixteen chapters of a book of 1:04:12, in seconds.
+    const SIXTEEN: [u64; 16] = [
+        0, 195, 398, 626, 836, 1052, 1370, 1594, 1793, 2119, 2315, 2557, 2876, 3094, 3283, 3504,
+    ];
+
+    /// The plan that cuts behind the chapters `after` names, counted from 1.
+    fn cut(
+        layouts: &[Layout],
+        opts: &Conversion,
+        after: &[usize],
+    ) -> Result<PiecePlan, PieceError> {
+        let after: Vec<NonZeroUsize> = after
+            .iter()
+            .map(|chapter| NonZeroUsize::new(*chapter).unwrap())
+            .collect();
+
+        plan_cuts(layouts, opts, &after)
+    }
+
+    /// The plan that cuts behind the chapters `after` names, as (first chapter, chapters,
+    /// seconds) per piece.
+    fn cut_at(layouts: &[Layout], opts: &Conversion, after: &[usize]) -> Vec<(usize, usize, u64)> {
+        cut(layouts, opts, after)
+            .expect("a plan")
+            .pieces
+            .iter()
+            .map(|piece| (piece.first_chapter, piece.chapters, piece.frames / SECOND))
+            .collect()
+    }
+
+    /// A conversion that drops `leading` seconds off the start and `trailing` off the end.
+    fn skipping(leading: u64, trailing: u64) -> Conversion {
+        Conversion {
+            silence: SilenceOpts {
+                skip_leading: leading * SECOND,
+                ..SilenceOpts::default()
+            },
+            skip_trailing: trailing * SECOND,
+            ..Conversion::default()
+        }
+    }
+
+    #[test]
+    fn a_book_is_cut_behind_the_chapters_listed() {
+        // Chapter 1 alone, chapters 2 to 5, chapter 6 alone, and the ten that are left: the next
+        // pieces begin where chapters 2, 6 and 7 do, at 3:15, 17:32 and 22:50.
+        let layouts = book(3852, &SIXTEEN);
+
+        assert_eq!(
+            cut_at(&layouts, &Conversion::default(), &[1, 5, 6]),
+            [(0, 1, 195), (1, 4, 857), (5, 1, 318), (6, 10, 2482)]
+        );
+        let plan = cut(&layouts, &Conversion::default(), &[1, 5, 6]).unwrap();
+        assert_eq!(plan.starts(), [1, 5, 6]);
+    }
+
+    #[test]
+    fn no_chapter_listed_is_the_whole_book_in_one_piece() {
+        assert_eq!(
+            cut_at(&book(3852, &SIXTEEN), &Conversion::default(), &[]),
+            [(0, 16, 3852)]
+        );
+    }
+
+    #[test]
+    fn a_cut_behind_the_last_chapter_is_refused() {
+        let refusal = cut(&book(3852, &SIXTEEN), &Conversion::default(), &[5, 16])
+            .expect_err("no chapter after the last");
+
+        assert_eq!(refusal, PieceError::NoChapterAfter { chapter: 16 });
+        assert_eq!(
+            refusal.to_string(),
+            "nothing is left after chapter 16 to begin a piece with"
+        );
+        // The chapter in front of it is the last one that has a chapter behind it.
+        assert_eq!(
+            cut_at(&book(3852, &SIXTEEN), &Conversion::default(), &[15]),
+            [(0, 15, 3504), (15, 1, 348)]
+        );
+    }
+
+    #[test]
+    fn cuts_that_do_not_strictly_increase_are_refused() {
+        let layouts = book(3852, &SIXTEEN);
+
+        for after in [&[5, 1][..], &[5, 5], &[1, 6, 5]] {
+            let refusal = cut(&layouts, &Conversion::default(), after).expect_err("no plan");
+            assert_eq!(refusal, PieceError::CutsNotIncreasing, "{after:?}");
+        }
+        assert_eq!(
+            PieceError::CutsNotIncreasing.to_string(),
+            "the chapters to split after must strictly increase"
+        );
+    }
+
+    #[test]
+    fn a_cut_where_the_skips_leave_nothing_to_begin_is_refused() {
+        // What is split runs from 20 to 80: the chapters that begin at 10 and at 20 begin in the
+        // leading skip or where it ends, and the one at 80 where the trailing skip begins.
+        let layouts = book(100, &[0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
+        let skips = skipping(20, 20);
+
+        for chapter in [1, 2, 8, 9] {
+            assert_eq!(
+                cut(&layouts, &skips, &[chapter]).expect_err("no plan"),
+                PieceError::NoChapterAfter { chapter },
+                "{chapter}"
+            );
+        }
+        // The chapters at 30 and at 70 lie inside it. The ones in front of 30 begin where the
+        // skip ends, with the one the book opens with, and are counted as that one.
+        assert_eq!(
+            cut_at(&layouts, &skips, &[3, 7]),
+            [(0, 1, 10), (3, 4, 40), (7, 1, 10)]
+        );
+    }
+
+    #[test]
+    fn a_cut_where_chapters_share_a_place_begins_at_the_last_of_them() {
+        // The input in the middle states no length, so it begins where the one behind it does.
+        let layouts = files(&[10, 0, 10]);
+
+        for after in [1, 2] {
+            let plan = cut(&layouts, &Conversion::default(), &[after]).expect("a plan");
+            assert_eq!(plan.starts(), [2], "{after}");
+            assert_eq!(
+                plan.pieces
+                    .iter()
+                    .map(|piece| piece.chapters)
+                    .collect::<Vec<_>>(),
+                [1, 1]
+            );
+        }
+        assert_eq!(
+            cut(&layouts, &Conversion::default(), &[1, 2]).expect_err("one place"),
+            PieceError::CutsNotIncreasing
+        );
+    }
+
+    #[test]
+    fn a_typed_list_out_of_order_draws_no_cut_backwards() {
+        // A list nobody sorted is refused by the conversion; in front of it, its chapters at 60
+        // and at 30 are no pair of cuts either way round.
+        let stated = Conversion {
+            chapter_mode: ChapterMode::Explicit(vec![60 * SECOND, 30 * SECOND]),
+            ..Conversion::default()
+        };
+
+        for after in [&[1, 2][..], &[2, 1]] {
+            assert_eq!(
+                cut(&files(&[100]), &stated, after).expect_err("no plan"),
+                PieceError::CutsNotIncreasing,
+                "{after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_left_between_the_skips_is_refused_however_it_is_cut() {
+        for after in [&[][..], &[1]] {
+            assert_eq!(
+                cut(&book(10, &[0, 5]), &skipping(6, 4), after).expect_err("no plan"),
+                PieceError::NothingLeft,
+                "{after:?}"
+            );
+        }
     }
 
     #[test]

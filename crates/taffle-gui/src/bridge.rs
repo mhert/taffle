@@ -112,6 +112,11 @@ pub mod qobject {
         #[cxx_name = "setPieces"]
         fn set_pieces(self: Pin<&mut Self>, text: &QString);
 
+        /// The chapters a piece ends after, separated by commas.
+        #[qinvokable]
+        #[cxx_name = "setSplitAfter"]
+        fn set_split_after(self: Pin<&mut Self>, text: &QString);
+
         /// Whether the silence the first chapter begins with is dropped.
         #[qinvokable]
         #[cxx_name = "setTrimLeading"]
@@ -167,6 +172,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "piecesText"]
         fn pieces_text(self: &Self) -> QString;
+
+        /// What the split-after field holds.
+        #[qinvokable]
+        #[cxx_name = "splitAfterText"]
+        fn split_after_text(self: &Self) -> QString;
 
         /// Whether the leading silence is dropped.
         #[qinvokable]
@@ -375,6 +385,12 @@ impl qobject::TaffleApp {
         self.as_mut().refresh();
     }
 
+    /// The chapters a piece ends after, separated by commas.
+    pub fn set_split_after(mut self: Pin<&mut Self>, text: &QString) {
+        self.as_mut().rust_mut().panel.split_after_text = text.to_string();
+        self.as_mut().refresh();
+    }
+
     /// Whether the silence the first chapter begins with is dropped.
     pub fn set_trim_leading(mut self: Pin<&mut Self>, on: bool) {
         self.as_mut().rust_mut().panel.trim_leading = on;
@@ -437,6 +453,11 @@ impl qobject::TaffleApp {
     /// What the pieces field holds.
     pub fn pieces_text(&self) -> QString {
         QString::from(self.rust().panel.pieces_text.as_str())
+    }
+
+    /// What the split-after field holds.
+    pub fn split_after_text(&self) -> QString {
+        QString::from(self.rust().panel.split_after_text.as_str())
     }
 
     /// Whether the leading silence is dropped.
