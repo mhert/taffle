@@ -74,8 +74,8 @@ pub struct ConvertArgs {
     ///
     /// Taken off behind everything else: the seconds counted are the last of what is written,
     /// with every trim and every pause already in them. A chapter that would begin in what is
-    /// dropped is no chapter of the file. With --pieces, the seconds dropped come off the last
-    /// piece, and the cuts are planned over what is left.
+    /// dropped is no chapter of the file. When the book is cut into pieces, the seconds dropped
+    /// come off the last piece, and the cuts are planned over what is left.
     #[arg(long, value_name = "SECONDS", default_value = "0")]
     pub skip_trailing: Seconds,
 
