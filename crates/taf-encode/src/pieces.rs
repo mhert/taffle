@@ -78,6 +78,10 @@ pub struct PlannedPiece {
 pub struct PiecePlan {
     /// The pieces. Never empty.
     pub pieces: Vec<PlannedPiece>,
+    /// How many chapters of the conversion's chapter plan begin in front of the trailing skip:
+    /// the number the last of them has, counted from 1, where piece `i` holds the chapters from
+    /// its own first one to the one in front of the first of piece `i + 1`.
+    pub chapters: usize,
 }
 
 impl PiecePlan {
@@ -160,8 +164,8 @@ pub fn plan_pieces(
     Ok(laid_out(
         &chosen(&places, start, end, pieces),
         places.len(),
-        start,
-        end,
+        &chapters,
+        (start, end),
     ))
 }
 
@@ -203,7 +207,7 @@ pub fn plan_cuts(
         cuts.push(cut);
     }
 
-    Ok(laid_out(&cuts, places.len(), start, end))
+    Ok(laid_out(&cuts, places.len(), &chapters, (start, end)))
 }
 
 /// What is split of the conversion `opts` states over inputs that state `layouts`: from where
@@ -313,9 +317,15 @@ fn even_point(start: u64, end: u64, cut: usize, pieces: usize) -> u64 {
     start + u64::try_from(into).unwrap_or(u64::MAX)
 }
 
-/// The pieces the cuts make of what is split, where `places` is how many places there were to
-/// cut at — one chapter each, behind the one the book opens with.
-fn laid_out(cuts: &[(usize, usize, u64)], places: usize, start: u64, end: u64) -> PiecePlan {
+/// The pieces the cuts make of what is split, from `start` to `end`, where `places` is how many
+/// places there were to cut at — one chapter each, behind the one the book opens with — and
+/// `chapters` is where every chapter of the conversion begins.
+fn laid_out(
+    cuts: &[(usize, usize, u64)],
+    places: usize,
+    chapters: &[u64],
+    (start, end): (u64, u64),
+) -> PiecePlan {
     let mut pieces = Vec::with_capacity(cuts.len() + 1);
     // The piece being laid out: the chapter it begins at, where that is, and how many chapters
     // lie in front of it.
@@ -335,7 +345,10 @@ fn laid_out(cuts: &[(usize, usize, u64)], places: usize, start: u64, end: u64) -
         frames: end - begins,
     });
 
-    PiecePlan { pieces }
+    PiecePlan {
+        pieces,
+        chapters: chapters.iter().filter(|offset| **offset < end).count(),
+    }
 }
 
 #[cfg(test)]
@@ -437,6 +450,7 @@ mod tests {
         );
         let plan = cut(&layouts, &Conversion::default(), &[1, 5, 6]).unwrap();
         assert_eq!(plan.starts(), [1, 5, 6]);
+        assert_eq!(plan.chapters, 16);
     }
 
     #[test]
@@ -498,6 +512,8 @@ mod tests {
             cut_at(&layouts, &skips, &[3, 7]),
             [(0, 1, 10), (3, 4, 40), (7, 1, 10)]
         );
+        // The chapters at 80 and at 90 begin in the trailing skip, and are none of the book's.
+        assert_eq!(cut(&layouts, &skips, &[3]).unwrap().chapters, 8);
     }
 
     #[test]
@@ -508,6 +524,7 @@ mod tests {
         for after in [1, 2] {
             let plan = cut(&layouts, &Conversion::default(), &[after]).expect("a plan");
             assert_eq!(plan.starts(), [2], "{after}");
+            assert_eq!(plan.chapters, 3, "{after}");
             assert_eq!(
                 plan.pieces
                     .iter()
@@ -583,7 +600,9 @@ mod tests {
             &Conversion::default(),
             NonZeroUsize::new(3).unwrap(),
         );
-        assert_eq!(plan.unwrap().starts(), [6, 11]);
+        let plan = plan.unwrap();
+        assert_eq!(plan.starts(), [6, 11]);
+        assert_eq!(plan.chapters, 16);
     }
 
     #[test]
@@ -687,6 +706,8 @@ mod tests {
         let layouts = book(100, &[0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
 
         assert_eq!(planned(&layouts, &skipping, 2), [(0, 3, 30), (5, 3, 30)]);
+        let plan = plan_pieces(&layouts, &skipping, NonZeroUsize::MIN).unwrap();
+        assert_eq!(plan.chapters, 8);
     }
 
     #[test]

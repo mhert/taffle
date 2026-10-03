@@ -119,13 +119,22 @@ fn planned(
 
 /// Says what the pieces of `job` are: the file each of them goes to, how long the headers say it
 /// plays, and the chapters of the book it holds.
+///
+/// The chapters are said in the numbers the conversion gives them, which are the ones a cut is
+/// typed in: a piece runs from its own first chapter to the one in front of the next piece's. A
+/// skip can take chapters out of a file, and that is no reason to number the ones behind it anew.
 fn announce(job: &ConvertJob, plan: &PiecePlan) {
     eprintln!("{} pieces:", plan.pieces.len());
 
-    let mut first = 1;
-    for (path, piece) in output_paths(job).iter().zip(&plan.pieces) {
-        let last = first + piece.chapters - 1;
-        let chapters = if piece.chapters == 1 {
+    let lasts = plan
+        .pieces
+        .iter()
+        .skip(1)
+        .map(|piece| piece.first_chapter)
+        .chain([plan.chapters]);
+    for ((path, piece), last) in output_paths(job).iter().zip(&plan.pieces).zip(lasts) {
+        let first = piece.first_chapter + 1;
+        let chapters = if first == last {
             format!("chapter {first}")
         } else {
             format!("chapters {first}-{last}")
@@ -135,7 +144,6 @@ fn announce(job: &ConvertJob, plan: &PiecePlan) {
             path.display(),
             at_clock(piece.frames)
         );
-        first = last + 1;
     }
 }
 
