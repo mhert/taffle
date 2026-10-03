@@ -124,8 +124,10 @@ taffle info <FILE.taf>...            # inspect/validate TAF files
 
 Options (convert):
   -o, --output <PATH>                Output .taf. Default: first input's name + .taf
-      --skip-leading <SECONDS>       Drop N seconds from the very start (e.g. 4.4)
-      --skip-trailing <SECONDS>      Drop N seconds from the very end (e.g. 12.5)
+      --skip-leading <SECONDS>       Drop N seconds from the very start
+                                     (e.g. 4.0 for Audible's intro)
+      --skip-trailing <SECONDS>      Drop N seconds from the very end
+                                     (e.g. 2.45 for Audible's outro)
       --trim-pause-leading           Trim leading silence at the start of chapter 1
                                      (applied after --skip-leading)
       --trim-pause-each-chapter      Trim leading silence at the start of every
