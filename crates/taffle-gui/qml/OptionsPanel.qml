@@ -232,7 +232,8 @@ ColumnLayout {
     }
 
     // The fields stand at the top of the column, whatever the window's height leaves under them.
-    // It has no height of its own, so it adds nothing to the height the window is held to.
+    // It has no height of its own, so all it adds to the height the window is held to is the
+    // one spacing the column puts in front of it.
     Item {
         Layout.fillHeight: true
     }
