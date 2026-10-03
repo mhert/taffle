@@ -64,18 +64,18 @@ pub struct ConvertArgs {
     #[arg(short, long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    /// Drop N seconds from the very start (e.g. 4.4)
+    /// Drop N seconds from the very start (e.g. 4.0 for Audible's intro)
     ///
     /// Taken off in front of everything else, so a trim of chapter 1 begins where this ended.
     #[arg(long, value_name = "SECONDS", default_value = "0")]
     pub skip_leading: Seconds,
 
-    /// Drop N seconds from the very end (e.g. 12.5)
+    /// Drop N seconds from the very end (e.g. 2.45 for Audible's outro)
     ///
     /// Taken off behind everything else: the seconds counted are the last of what is written,
     /// with every trim and every pause already in them. A chapter that would begin in what is
-    /// dropped is no chapter of the file. With --pieces, the seconds dropped come off the last piece, and the cuts
-    /// are planned over what is left.
+    /// dropped is no chapter of the file. With --pieces, the seconds dropped come off the last
+    /// piece, and the cuts are planned over what is left.
     #[arg(long, value_name = "SECONDS", default_value = "0")]
     pub skip_trailing: Seconds,
 

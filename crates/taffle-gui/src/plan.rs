@@ -49,14 +49,25 @@ pub struct Panel {
     pub extract_cover: bool,
 }
 
+/// How much a fresh panel drops from the very start: Audible's spoken intro.
+const AUDIBLE_INTRO: &str = "4.0";
+
+/// How much a fresh panel drops from the very end: Audible's spoken outro.
+const AUDIBLE_OUTRO: &str = "2.45";
+
 impl Default for Panel {
     fn default() -> Self {
         Self {
             files: Vec::new(),
             output_text: String::new(),
             chapters_text: String::new(),
-            skip_leading_text: String::new(),
-            skip_trailing_text: String::new(),
+            // Most books converted here come out of Audible, which puts the same spoken intro
+            // in front of every book and the same spoken outro behind it. The intro ends 3.67 s
+            // in and no book begins before 4.24 s; the outro begins at most 2.38 s before the
+            // end and no book ends later than 2.55 s before it. So these two take both off and
+            // leave every book whole — and a book that is no Audible one is a field to empty.
+            skip_leading_text: String::from(AUDIBLE_INTRO),
+            skip_trailing_text: String::from(AUDIBLE_OUTRO),
             trim_leading: false,
             trim_each_chapter: false,
             add_pause_leading_text: String::new(),
@@ -321,10 +332,14 @@ mod tests {
         Panel,
     };
 
-    /// A panel holding `files` and nothing typed into any of its fields.
+    /// A panel holding `files` and nothing typed into any of its fields — the Audible skips a
+    /// fresh panel starts with included, so that what a test types is all a conversion is
+    /// asked for.
     fn panel(files: &[&str]) -> Panel {
         Panel {
             files: files.iter().map(PathBuf::from).collect(),
+            skip_leading_text: String::new(),
+            skip_trailing_text: String::new(),
             ..Panel::default()
         }
     }
@@ -335,6 +350,23 @@ mod tests {
             frames: 480_000,
             marks: vec![0, 240_000],
         })]
+    }
+
+    #[test]
+    fn a_fresh_panel_drops_the_audible_intro_and_outro() {
+        let fresh = Panel {
+            files: vec![PathBuf::from("b.m4b")],
+            ..Panel::default()
+        };
+
+        let plan = capture(&fresh, &[]).expect("a plan");
+
+        // 4.0 s and 2.45 s, in the 48 kHz frames a conversion counts in — and what is shown in
+        // the fields is what was typed there, so the panel says where the numbers came from.
+        assert_eq!(plan.job.options.silence.skip_leading, 192_000);
+        assert_eq!(plan.job.options.skip_trailing, 117_600);
+        assert_eq!(fresh.skip_leading_text, "4.0");
+        assert_eq!(fresh.skip_trailing_text, "2.45");
     }
 
     #[test]
