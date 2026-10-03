@@ -703,9 +703,11 @@ mod tests {
         };
         let fits = PiecePlan {
             pieces: vec![piece(MAX_CHAPTERS), piece(1)],
+            chapters: MAX_CHAPTERS + 1,
         };
         let over = PiecePlan {
             pieces: vec![piece(3), piece(MAX_CHAPTERS + 1)],
+            chapters: MAX_CHAPTERS + 4,
         };
 
         assert_eq!(piece_warning(&fits), None);

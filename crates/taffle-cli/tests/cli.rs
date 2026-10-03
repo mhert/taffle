@@ -821,6 +821,31 @@ fn a_run_cut_after_the_chapters_listed_says_the_pieces_first_and_writes_one_file
 }
 
 #[test]
+fn the_pieces_are_said_in_the_chapter_numbers_that_were_typed() {
+    let dir = TempDir::new().expect("a directory of its own");
+    let book = wav(dir.path(), "book.wav", &tone(3.0));
+
+    // The skip takes the start of chapter 2 with it, so the first file holds one chapter — but
+    // what was typed is chapters 1 and 2, and those are the numbers it is said in.
+    taffle()
+        .arg(&book)
+        .args(["--skip-leading", "1.5", "--chapters", "0:00,0:01,0:02"])
+        .args(["--split-after", "2"])
+        .assert()
+        .success()
+        .stderr(
+            contains(format!(
+                "  {}  ~0:00  (chapters 1-2)",
+                dir.path().join("book-1.taf").display()
+            ))
+            .and(contains(format!(
+                "  {}  ~0:01  (chapter 3)",
+                dir.path().join("book-2.taf").display()
+            ))),
+        );
+}
+
+#[test]
 fn a_typed_chapter_list_out_of_order_is_refused_before_the_pieces_are_planned() {
     let dir = TempDir::new().expect("a directory of its own");
     let book = wav(dir.path(), "book.wav", &tone(3.0));
