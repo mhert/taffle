@@ -132,3 +132,45 @@ pub fn probe_marks(source: Box<dyn MediaSource>) -> Result<Vec<u64>, ProbeError>
 fn unrecognized<E>(_: E) -> ProbeError {
     ProbeError::Unrecognized
 }
+
+// The marks are pinned here rather than beside the duration's tests under `tests/`: a unit test
+// runs in the first test binary of the crate, so a change that breaks `probe_marks` fails in a
+// second rather than behind the end-to-end conversions — which is what keeps a mutation run that
+// shares its machine with others inside its timeout.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{probe_marks, ProbeError};
+
+    /// Ten seconds of AAC in an MP4 at 44 100 Hz, with two chapter marks five seconds apart.
+    const TINY_M4B: &[u8] = include_bytes!("../tests/fixtures/tiny.m4b");
+
+    /// The same tone as an MP3, which carries no chapter marks at all.
+    const TINY_MP3: &[u8] = include_bytes!("../tests/fixtures/tiny.mp3");
+
+    #[test]
+    fn a_book_states_where_its_chapters_begin_in_the_frames_a_conversion_counts_in() {
+        let marks = probe_marks(Box::new(Cursor::new(TINY_M4B.to_vec())))
+            .expect("the m4b states its marks");
+
+        // Authored at 44 100 Hz five seconds apart, which is 240 000 frames at 48 kHz.
+        assert_eq!(marks, [0, 240_000]);
+    }
+
+    #[test]
+    fn an_input_that_carries_no_marks_states_none() {
+        let marks = probe_marks(Box::new(Cursor::new(TINY_MP3.to_vec()))).expect("the mp3 is read");
+
+        assert!(marks.is_empty());
+    }
+
+    #[test]
+    fn bytes_that_are_no_recording_state_no_marks_either() {
+        let refusal = probe_marks(Box::new(Cursor::new(b"not a recording at all".to_vec())))
+            .expect_err("nothing to read marks off");
+
+        assert!(matches!(refusal, ProbeError::Unrecognized), "{refusal:?}");
+    }
+}
